@@ -9,6 +9,19 @@ import { SharedSshAgent } from "./shared-ssh-agent.ts";
 
 const containerAgentDir = "/run/agents-in-the-cloud-ssh-agent";
 let shared: SharedSshAgent | undefined;
+const workspaceKeySources = new Set<(workspaceId: string) => Promise<string[]>>();
+
+/** Add private keys that only one workspace's agent may sign with, such as the key its leased machines trust. */
+export function registerWorkspaceSshKeySource(source: (workspaceId: string) => Promise<string[]>): () => void {
+  workspaceKeySources.add(source);
+  return () => { workspaceKeySources.delete(source); };
+}
+
+/** The global and template keys every workspace of the template may use, plus the workspace's own. */
+async function signingKeys(workspaceTemplateId?: string, workspaceId?: string): Promise<string[]> {
+  const workspaceKeys = workspaceId ? await Promise.all([...workspaceKeySources].map(source => source(workspaceId))) : [];
+  return [...await revealEffectiveSshKeys(workspaceTemplateId), ...workspaceKeys.flat()];
+}
 
 function agentDir(workspaceId: string): string {
   return agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId);
@@ -23,9 +36,9 @@ function sshEnvironment(directory: string) {
 
 export async function workspaceSourceSshEnvironment(workspaceId: string, workspaceTemplateId?: string): Promise<Record<string, string>> {
   // One module owns the signing backend for the lifetime of AgentsInTheCloud, not a workspace.
-  shared ??= new SharedSshAgent(agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-signer"), async (id) => revealEffectiveSshKeys(id));
+  shared ??= new SharedSshAgent(agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-signer"), signingKeys);
   const directory = agentDir(workspaceId);
-  await shared.listen(join(directory, "agent.sock"), workspaceTemplateId);
+  await shared.listen(join(directory, "agent.sock"), workspaceTemplateId, workspaceId);
   await prepareWorkspaceSshTrust(directory, workspaceTemplateId);
   await writeFile(join(directory, "workspace_known_hosts"), "", { flag: "wx" }).catch(error => {
     if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
