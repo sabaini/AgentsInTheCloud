@@ -6,7 +6,7 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type { WorkspaceInitInstruction } from "@agents-in-the-cloud/workspace";
 
-export type WorkspaceTemplateSummary = Omit<WorkspaceTemplateRecord, "secrets" | "sshKeys" | "sshKnownHosts" | "environment" | "privateNetworkAccess"> & {
+export type WorkspaceTemplateSummary = Omit<WorkspaceTemplateRecord, "secrets" | "sshKeys" | "sshKnownHosts" | "environment" | "privateNetworkAccess" | "machineProfiles" | "maxMachines"> & {
   configurationFingerprint?: string;
   /** Adding a template counts as using it, as does creating a workspace from it. */
   lastUsedAt?: number;
@@ -18,6 +18,8 @@ export type StoredWorkspaceTemplateSshKey = Static<typeof storedWorkspaceTemplat
 export type WorkspaceTemplateSshKeySummary = Omit<StoredWorkspaceTemplateSshKey, "projectId" | "encryptedPrivateKey"> & { workspaceTemplateId?: string };
 export type StoredWorkspaceTemplateEnvironmentVariable = Static<typeof workspaceTemplateEnvironmentVariableSchema>;
 export type WorkspaceTemplateEnvironmentVariable = Omit<StoredWorkspaceTemplateEnvironmentVariable, "projectId"> & { workspaceTemplateId?: string };
+export type StoredWorkspaceTemplateMachineProfile = Static<typeof storedMachineProfileSchema>;
+export type WorkspaceTemplateMachineProfile = StoredWorkspaceTemplateMachineProfile & { workspaceTemplateId: string };
 export type WorkspaceTemplateRecord = Static<typeof workspaceTemplateRecordSchema>;
 /** Records that own Secrets, SSH keys, trusted SSH servers, Environment variables and Private network access. */
 export type ConfigurationRecord = Static<typeof configurationRecordSchema>;
@@ -88,6 +90,19 @@ const configurationProperties = {
 
 const configurationRecordSchema = Type.Object(configurationProperties);
 
+/** What Agents may create on the connected LXD server; CPU, memory and network come from the LXD profiles. */
+const storedMachineProfileSchema = Type.Object({
+  id: Type.String(),
+  name: Type.String(),
+  image: Type.String(),
+  type: Type.Union([Type.Literal("virtual-machine"), Type.Literal("container")]),
+  lxdProfiles: Type.Array(Type.String()),
+  diskSizesGiB: Type.Array(Type.Number()),
+  lifetimeHours: Type.Number(),
+  createdAt: Type.String(),
+  updatedAt: Type.String(),
+});
+
 const workspaceTemplateRecordSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
@@ -103,6 +118,8 @@ const workspaceTemplateRecordSchema = Type.Object({
   seedConfigEnabled: Type.Optional(Type.Boolean()),
   dockerfile: Type.Optional(Type.String()),
   preloadImages: Type.Optional(Type.Array(Type.String())),
+  machineProfiles: Type.Optional(Type.Array(storedMachineProfileSchema)),
+  maxMachines: Type.Optional(Type.Number()),
 });
 
 // This discriminator and projectId are part of the existing init.json format.
@@ -283,7 +300,16 @@ function workspaceTemplateSummary(workspaceTemplate: WorkspaceTemplateRecord, gl
 export type WorkspaceTemplateConfiguration = WorkspaceTemplateSummary & {
   environment: WorkspaceTemplateEnvironmentVariable[];
   secrets: WorkspaceTemplateSecretSummary[];
+  machineProfiles: WorkspaceTemplateMachineProfile[];
+  maxMachines: number;
 };
+
+/** Templates saved before Machines existed allow this many per workspace. */
+export const defaultMaxMachines = 3;
+
+export function workspaceTemplateMachineProfileSummary(profile: StoredWorkspaceTemplateMachineProfile, workspaceTemplateId: string): WorkspaceTemplateMachineProfile {
+  return { ...profile, workspaceTemplateId };
+}
 
 export function workspaceTemplateSecretSummary(secret: StoredWorkspaceTemplateSecret): WorkspaceTemplateSecretSummary {
   const { encryptedSecret, projectId, ...metadata } = secret;
@@ -306,6 +332,8 @@ export async function getWorkspaceTemplateConfiguration(workspaceTemplateId: str
     ...workspaceTemplateSummary(workspaceTemplate, store.global),
     environment: workspaceTemplateEnvironmentVariableSummaries(workspaceTemplate),
     secrets: workspaceTemplateSecretSummaries(workspaceTemplate),
+    machineProfiles: (workspaceTemplate.machineProfiles ?? []).map((profile) => workspaceTemplateMachineProfileSummary(profile, workspaceTemplate.id)).sort((a, b) => a.name.localeCompare(b.name)),
+    maxMachines: workspaceTemplate.maxMachines ?? defaultMaxMachines,
   };
 }
 
