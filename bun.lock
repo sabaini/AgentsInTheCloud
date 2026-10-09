@@ -37,6 +37,7 @@
         "@agents-in-the-cloud/host": "workspace:*",
         "@agents-in-the-cloud/inline-content": "workspace:*",
         "@agents-in-the-cloud/llm": "workspace:*",
+        "@agents-in-the-cloud/machines": "workspace:*",
         "@agents-in-the-cloud/pi-agent": "workspace:*",
         "@agents-in-the-cloud/prompt": "workspace:*",
         "@agents-in-the-cloud/proxy-egress": "workspace:*",
@@ -362,6 +363,8 @@
       "name": "@agents-in-the-cloud/machines",
       "dependencies": {
         "@agents-in-the-cloud/core": "workspace:*",
+        "@agents-in-the-cloud/design-system": "workspace:*",
+        "@agents-in-the-cloud/shared": "workspace:*",
         "typebox": "^1.0.57",
       },
     },

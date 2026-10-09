@@ -41,9 +41,11 @@ try {
   cleanup.unshift(["project", "delete", on(project)]);
   const token = (await lxc("config", "trust", "add", ...(options.remote ? [on()] : []), "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;
   const credentials = await step("create AITC client certificate", () => createLxdClientCredentials(project));
-  const server = await step("join with a restricted trust token", () => joinLxdServer(token, credentials, project));
+  const joined = await step("join with a restricted trust token", () => joinLxdServer(token, credentials));
+  const { server } = joined;
   cleanup.unshift(["config", "trust", "remove", on(certificateFingerprint(credentials.certificate))]);
   console.log(`    pinned ${server.address}`);
+  assert.equal(joined.project, project);
   const lxd = new LxdClient({ server, credentials, project });
 
   await step("restricted to its own project", async () => {
@@ -100,6 +102,12 @@ try {
     await lxd.setInstanceState(instance, "stop", true);
     await lxd.deleteInstance(instance);
     cleanup.shift();
+  });
+
+  await step("untrust AITC's own certificate", async () => {
+    await lxd.removeOwnCertificate();
+    cleanup.shift();
+    assert(!(await lxc("config", "trust", "list", ...(options.remote ? [on()] : []), "--format", "csv")).includes(`,${project},`));
   });
 
   for (const args of cleanup) await lxc(...args);

@@ -1,7 +1,7 @@
 import { AgentsInTheCloudCoreError } from "@agents-in-the-cloud/core";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
-import { lxdFetchTls, type LxdTlsIdentity } from "./tls.ts";
+import { certificateFingerprint, lxdFetchTls, type LxdTlsIdentity } from "./tls.ts";
 import { LxdWebSocket } from "./websocket.ts";
 
 export interface LxdConnection extends LxdTlsIdentity {
@@ -47,7 +47,9 @@ interface LxdOperationResult { status_code: number; err: string }
 
 const changeResponse = Type.Union([syncResponse(Type.Unknown()), asyncResponse(Type.Unknown())]);
 const changeFinished = finishedOperation(Type.Unknown());
-const serverResponse = syncResponse(Type.Object({ auth: Type.String() }));
+const serverResponse = syncResponse(Type.Object({ environment: Type.Object({ server_name: Type.String(), server_version: Type.String() }) }));
+const certificateResponse = syncResponse(Type.Object({ restricted: Type.Boolean(), projects: Type.Array(Type.String()) }));
+const projectResponse = syncResponse(Type.Object({ config: Type.Record(Type.String(), Type.String()) }));
 const instanceSchema = Type.Object({
   name: Type.String(),
   type: Type.String(),
@@ -73,28 +75,27 @@ export interface LxdExecProcess {
 
 const name = (value: string) => encodeURIComponent(value);
 
-/** One project on one LXD server, reached with AITC's restricted client certificate. */
-export class LxdClient {
-  constructor(private readonly connection: LxdConnection) {}
+/** Requests about the server and AITC's own certificate, which need no project. */
+export class LxdServerClient {
+  constructor(protected readonly identity: LxdTlsIdentity) {}
 
-  private url(path: string, query: Record<string, string> = {}): URL {
-    const url = new URL(path, `https://${this.connection.server.address}`);
-    url.searchParams.set("project", this.connection.project);
+  protected url(path: string, query: Record<string, string> = {}): URL {
+    const url = new URL(path, `https://${this.identity.server.address}`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     return url;
   }
 
-  private async send(method: string, path: string, body?: LxdRequestBody, query?: Record<string, string>): Promise<Response> {
+  protected async send(method: string, path: string, body?: LxdRequestBody, query?: Record<string, string>): Promise<Response> {
     return await fetch(this.url(path, query), {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? undefined : { "content-type": "application/json" },
-      tls: lxdFetchTls(this.connection),
+      tls: lxdFetchTls(this.identity),
     });
   }
 
   /** Decode LXD's response envelope, turning error responses into LxdRequestError. */
-  private async receive<T extends TSchema>(schema: T, response: Response, what: string): Promise<Static<T>> {
+  protected async receive<T extends TSchema>(schema: T, response: Response, what: string): Promise<Static<T>> {
     const json: unknown = await response.json();
     if (Value.Check(errorResponse, json)) throw new LxdRequestError(json.error_code, `${what}: ${json.error}`);
     if (Value.Check(schema, json)) return json;
@@ -102,32 +103,64 @@ export class LxdClient {
     throw new AgentsInTheCloudCoreError("lxd_unexpected_response", `Unexpected LXD response to ${what}: ${first ? `${first.instancePath || "/"} ${first.message}` : "invalid"}`);
   }
 
-  private async get<T extends TSchema>(schema: T, path: string, query?: Record<string, string>): Promise<Static<T>> {
+  protected async get<T extends TSchema>(schema: T, path: string, query?: Record<string, string>): Promise<Static<T>> {
     return await this.receive(schema, await this.send("GET", path, undefined, query), `GET ${path}`);
   }
 
-  private async waitFor<T extends TSchema>(schema: T, operation: string, what: string): Promise<Static<T>> {
+  protected async waitFor<T extends TSchema>(schema: T, operation: string, what: string): Promise<Static<T>> {
     return await this.receive(schema, await this.send("GET", `${operation}/wait`, undefined, { timeout: "-1" }), `${what} (waiting)`);
   }
 
-  private succeeded(result: LxdOperationResult, what: string): void {
+  protected succeeded(result: LxdOperationResult, what: string): void {
     if (result.status_code !== 200) throw new LxdRequestError(result.status_code, `${what}: ${result.err || `operation ended with status ${result.status_code}`}`);
   }
 
   /** Make a change, waiting for its operation when LXD runs it in the background. */
-  private async perform(method: string, path: string, body?: LxdRequestBody): Promise<void> {
+  protected async perform(method: string, path: string, body?: LxdRequestBody): Promise<void> {
     const what = `${method} ${path}`;
     const response = await this.receive(changeResponse, await this.send(method, path, body), what);
     if (response.type === "async") this.succeeded((await this.waitFor(changeFinished, response.operation, what)).metadata, what);
   }
 
-  async server(): Promise<Static<typeof serverResponse>["metadata"]> {
-    return (await this.get(serverResponse, "/1.0")).metadata;
+  async server(): Promise<{ name: string; version: string }> {
+    const { environment } = (await this.get(serverResponse, "/1.0")).metadata;
+    return { name: environment.server_name, version: environment.server_version };
   }
 
   /** Redeem a trust token for the client certificate this connection presents. */
   async addCertificate(trustToken: string): Promise<void> {
     await this.perform("POST", "/1.0/certificates", { type: "client", trust_token: trustToken });
+  }
+
+  private ownCertificatePath(): string {
+    return `/1.0/certificates/${certificateFingerprint(this.identity.credentials.certificate)}`;
+  }
+
+  /** How LXD trusts AITC: restricted certificates may only use the listed projects. */
+  async ownCertificate(): Promise<Static<typeof certificateResponse>["metadata"]> {
+    return (await this.get(certificateResponse, this.ownCertificatePath())).metadata;
+  }
+
+  /** Stop LXD from trusting AITC's certificate. Restricted certificates may remove themselves. */
+  async removeOwnCertificate(): Promise<void> {
+    await this.perform("DELETE", this.ownCertificatePath());
+  }
+
+  async projectConfig(project: string): Promise<Record<string, string>> {
+    return (await this.get(projectResponse, `/1.0/projects/${name(project)}`)).metadata.config;
+  }
+}
+
+/** One project on one LXD server, reached with AITC's restricted client certificate. */
+export class LxdClient extends LxdServerClient {
+  constructor(private readonly connection: LxdConnection) {
+    super(connection);
+  }
+
+  protected override url(path: string, query: Record<string, string> = {}): URL {
+    const url = super.url(path, query);
+    url.searchParams.set("project", this.connection.project);
+    return url;
   }
 
   async instances(): Promise<LxdInstance[]> {
