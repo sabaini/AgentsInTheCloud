@@ -1,0 +1,9 @@
+{
+  "name": "@agents-in-the-cloud/machines",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agents-in-the-cloud/core": "workspace:*",
+    "typebox": "^1.0.57"
+  }
+}

@@ -1,0 +1,161 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Server, ServerWebSocket } from "bun";
+import type { JsonValue } from "@agents-in-the-cloud/core";
+import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdRequestError, parseLxdTrustToken, type LxdClientCredentials, type LxdServer } from "../src/lxd/index.ts";
+import { LxdWebSocket } from "../src/lxd/websocket.ts";
+
+type Fd = "0" | "1" | "2" | "control";
+interface ExecSession { sockets: Map<Fd, ServerWebSocket<Upgrade>>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
+interface Upgrade { session: ExecSession; fd: Fd }
+
+const trustSecret = "fake-secret";
+let issuedToken = "";
+let directory: string;
+let serverCertificate: string;
+let credentials: LxdClientCredentials;
+let fake: Server<Upgrade>;
+let trusted = false;
+const operations = new Map<string, Promise<{ status_code: number; err: string; metadata: { return: number } | null }>>();
+const execSessions = new Map<string, { session: ExecSession; fd: Fd }>();
+
+const sync = (metadata: JsonValue) => Response.json({ type: "sync", status: "Success", status_code: 200, operation: "", error_code: 0, error: "", metadata });
+const failure = (code: number, error: string) => Response.json({ type: "error", status: "", status_code: 0, operation: "", error_code: code, error, metadata: null }, { status: code });
+function operation(result: Promise<{ status_code: number; err: string; metadata: { return: number } | null }>, metadata: JsonValue = null): Response {
+  const id = crypto.randomUUID();
+  operations.set(id, result);
+  return Response.json({ type: "async", status: "Operation created", status_code: 100, operation: `/1.0/operations/${id}`, error_code: 0, error: "", metadata: { id, metadata } }, { status: 202 });
+}
+
+function token(fingerprint: string, addresses: string[], expiresAt = new Date(Date.now() + 60_000)): string {
+  return Buffer.from(JSON.stringify({ client_name: "aitc", fingerprint, addresses, secret: trustSecret, expires_at: expiresAt.toISOString(), type: "" })).toString("base64");
+}
+
+async function selfSignedServerCertificate(name: string): Promise<{ certificate: string; key: string }> {
+  const keyPath = join(directory, `${name}.key`);
+  const certificatePath = join(directory, `${name}.crt`);
+  const child = Bun.spawn(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1", "-subj", `/CN=${name}`, "-addext", "basicConstraints=critical,CA:FALSE", "-addext", `subjectAltName=DNS:${name}`, "-keyout", keyPath, "-out", certificatePath], { stderr: "pipe" });
+  expect(await child.exited).toBe(0);
+  return { certificate: await readFile(certificatePath, "utf8"), key: await readFile(keyPath, "utf8") };
+}
+
+beforeAll(async () => {
+  directory = await mkdtemp(join(tmpdir(), "machines-lxd-test-"));
+  const tls = await selfSignedServerCertificate("fake-lxd");
+  serverCertificate = tls.certificate;
+  credentials = await createLxdClientCredentials("aitc-test");
+  fake = Bun.serve<Upgrade>({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: tls.certificate, key: tls.key },
+    async fetch(request, server) {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      if (path === "/1.0" && request.method === "GET") return sync({ auth: trusted ? "trusted" : "untrusted" });
+      if (path === "/1.0/certificates" && request.method === "POST") {
+        const body = await request.json();
+        if (body.type !== "client" || body.trust_token !== issuedToken) return failure(403, "Forbidden");
+        trusted = true;
+        return sync(null);
+      }
+      if (path === "/1.0/instances" && request.method === "POST") {
+        const body = await request.json();
+        return operation(Promise.resolve(body.name === "broken" ? { status_code: 400, err: "Failed creating instance record: broken image", metadata: null } : { status_code: 200, err: "", metadata: null }));
+      }
+      if (path === "/1.0/instances/box/files") return url.searchParams.get("path") === "/etc/hostname" ? new Response("box\n") : failure(404, "Not Found");
+      if (path === "/1.0/instances/box/exec" && request.method === "POST") {
+        const session: ExecSession = { sockets: new Map(), opened: Promise.withResolvers(), finished: Promise.withResolvers() };
+        const fds = Object.fromEntries((["0", "1", "2", "control"] as const).map(fd => {
+          const secret = crypto.randomUUID();
+          execSessions.set(secret, { session, fd });
+          return [fd, secret];
+        }));
+        return operation(session.finished.promise.then(() => ({ status_code: 200, err: "", metadata: { return: 3 } })), { fds });
+      }
+      const wait = path.match(/^\/1\.0\/operations\/([^/]+)\/wait$/);
+      if (wait) return sync(await operations.get(wait[1]!)!);
+      if (/^\/1\.0\/operations\/[^/]+\/websocket$/.test(path)) {
+        const target = execSessions.get(url.searchParams.get("secret")!);
+        if (!target || !server.upgrade(request, { data: target })) return failure(403, "Forbidden");
+        return undefined;
+      }
+      return failure(404, "Not Found");
+    },
+    websocket: {
+      open(socket) {
+        socket.data.session.sockets.set(socket.data.fd, socket);
+        if (socket.data.session.sockets.size === 4) socket.data.session.opened.resolve();
+      },
+      // Behaves like `cat`: stdin is echoed to stdout until stdin closes.
+      async message(socket, message) {
+        await socket.data.session.opened.promise;
+        if (socket.data.fd === "0") socket.data.session.sockets.get("1")!.send(message);
+      },
+      async close(socket) {
+        if (socket.data.fd !== "0") return;
+        await socket.data.session.opened.promise;
+        for (const fd of ["1", "2", "control"] as const) socket.data.session.sockets.get(fd)!.close(1000);
+        socket.data.session.finished.resolve();
+      },
+    },
+  });
+});
+
+afterAll(async () => {
+  await fake.stop(true);
+  await rm(directory, { recursive: true, force: true });
+});
+
+const fakeAddress = () => `127.0.0.1:${fake.port}`;
+const fakeServer = (): LxdServer => ({ address: fakeAddress(), certificate: serverCertificate });
+const client = () => new LxdClient({ server: fakeServer(), credentials, project: "aitc" });
+
+test("trust tokens are decoded and checked before contacting LXD", () => {
+  const fingerprint = "a".repeat(64);
+  expect(parseLxdTrustToken(`  ${token(fingerprint, ["10.0.0.2:8443"])}\n`)).toMatchObject({ fingerprint, addresses: ["10.0.0.2:8443"], clientName: "aitc" });
+  expect(() => parseLxdTrustToken("not a token")).toThrow("doesn't look like an LXD trust token");
+  expect(() => parseLxdTrustToken(token(fingerprint, []))).toThrow("doesn't look like an LXD trust token");
+  expect(() => parseLxdTrustToken(token(fingerprint, ["10.0.0.2:8443"], new Date(Date.now() - 1000)))).toThrow("expired");
+});
+
+test("joining pins the first address that presents the token's certificate", async () => {
+  trusted = false;
+  issuedToken = token(certificateFingerprint(serverCertificate), ["127.0.0.1:1", fakeAddress()]);
+  const server = await joinLxdServer(issuedToken, credentials, "aitc");
+  expect(server).toEqual(fakeServer());
+  expect(trusted).toBe(true);
+});
+
+test("joining refuses a server whose certificate the token doesn't name", async () => {
+  const other = await selfSignedServerCertificate("other-lxd");
+  await expect(joinLxdServer(token(certificateFingerprint(other.certificate), [fakeAddress()]), credentials, "aitc")).rejects.toThrow("different certificate");
+});
+
+test("failed operations surface LXD's own error", async () => {
+  await client().createInstance({ name: "machine-1", type: "virtual-machine", source: { type: "image", alias: "24.04" } });
+  const failed = client().createInstance({ name: "broken", type: "virtual-machine", source: { type: "image", alias: "24.04" } });
+  await expect(failed).rejects.toThrow("Failed creating instance record: broken image");
+  await expect(failed).rejects.toBeInstanceOf(LxdRequestError);
+});
+
+test("missing files read as undefined", async () => {
+  expect((await client().readInstanceFile("box", "/etc/hostname"))?.toString()).toBe("box\n");
+  expect(await client().readInstanceFile("box", "/var/lib/cloud/instance/boot-finished")).toBeUndefined();
+});
+
+test("exec streams large stdin and stdout through pinned WebSockets", async () => {
+  const input = Buffer.alloc(1024 * 1024 + 7, "x");
+  input.write("first line\n");
+  const result = await client().run("box", ["cat"], input);
+  expect(result.exitCode).toBe(3);
+  expect(result.stderr).toBe("");
+  expect(result.stdout.equals(input)).toBe(true);
+});
+
+test("exec WebSockets refuse a server other than the pinned one", async () => {
+  const other = await selfSignedServerCertificate("impostor-lxd");
+  const url = new URL(`https://${fakeAddress()}/1.0/operations/none/websocket?secret=none`);
+  await expect(LxdWebSocket.connect({ server: { address: fakeAddress(), certificate: other.certificate }, credentials }, url)).rejects.toThrow("different certificate");
+});

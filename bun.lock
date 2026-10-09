@@ -325,6 +325,13 @@
         "typebox": "^1.0.57",
       },
     },
+    "packages/machines": {
+      "name": "@agents-in-the-cloud/machines",
+      "dependencies": {
+        "@agents-in-the-cloud/core": "workspace:*",
+        "typebox": "^1.0.57",
+      },
+    },
     "packages/markdown": {
       "name": "@agents-in-the-cloud/markdown",
       "dependencies": {
@@ -561,6 +568,8 @@
     "@agents-in-the-cloud/legacy-converter": ["@agents-in-the-cloud/legacy-converter@workspace:packages/legacy-converter"],
 
     "@agents-in-the-cloud/llm": ["@agents-in-the-cloud/llm@workspace:packages/llm"],
+
+    "@agents-in-the-cloud/machines": ["@agents-in-the-cloud/machines@workspace:packages/machines"],
 
     "@agents-in-the-cloud/markdown": ["@agents-in-the-cloud/markdown@workspace:packages/markdown"],
 
