@@ -184,8 +184,9 @@ async function writeWorkspaceInit(context: Awaited<ReturnType<typeof getAgentsIn
   await writeFile(workspaceMetadataPath(context, id, initPath), `${JSON.stringify(init, null, 2)}\n`);
 }
 
+/** Read from the host, so it works while the workspace is parked. */
 export async function getWorkspaceInit(id: string): Promise<WorkspaceInitInstruction | undefined> {
-  await resolveWorkspace(id);
+  await validateWorkspaceContainer(id);
   return await readWorkspaceInit(getAgentsInTheCloudRuntimeContext(), id);
 }
 
