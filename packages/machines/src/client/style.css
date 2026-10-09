@@ -13,8 +13,8 @@
 .machines-view { box-sizing: border-box; height: 100%; overflow: auto; display: grid; align-content: start; gap: 12px; padding: 16px; }
 .machines-view p { margin: 0; }
 .machines-view__error { color: var(--danger); }
-/* Errors need reading in full, and on a phone the actions move under the machine's details. */
-.machines-view__status { white-space: normal; }
+/* Details and errors need reading in full, and on a phone the actions move under them. */
+.machines-view .managed-list__description { white-space: normal; }
 .machines-view .managed-list__item { flex-wrap: wrap; padding-block: 8px; }
 .machines-view .managed-list__content { flex: 1 1 16rem; }
 .machines-view .managed-list__actions { margin-inline-start: auto; }
