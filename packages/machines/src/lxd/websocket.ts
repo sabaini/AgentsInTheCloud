@@ -1,5 +1,4 @@
 import { createHash, randomBytes } from "node:crypto";
-import { once } from "node:events";
 import type { TLSSocket } from "node:tls";
 import { AgentsInTheCloudCoreError } from "@agents-in-the-cloud/core";
 import { connectPinnedLxd, type LxdTlsIdentity } from "./tls.ts";
@@ -37,11 +36,11 @@ function encodeFrame(code: number, payload: Uint8Array): Buffer {
 export class LxdWebSocket {
   private buffered: Buffer;
   private closeSent = false;
-  private failed?: Error;
 
   private constructor(private readonly socket: TLSSocket, private readonly chunks: AsyncIterator<Buffer>, rest: Buffer) {
     this.buffered = rest;
-    socket.on("error", (error) => { this.failed = error; });
+    // Reads and writes report their own failures; without a listener the same error would also crash the process.
+    socket.on("error", () => {});
   }
 
   static async connect(identity: LxdTlsIdentity, url: URL): Promise<LxdWebSocket> {
@@ -106,19 +105,26 @@ export class LxdWebSocket {
     return { fin, code, payload };
   }
 
+  /** Resolves once the frame is flushed; a closed or dropped connection rejects instead of leaving it waiting. */
   private async write(frame: Buffer): Promise<void> {
-    if (this.failed) throw this.failed;
-    if (!this.socket.write(frame)) await once(this.socket, "drain");
+    await new Promise<void>((resolve, reject) => this.socket.write(frame, error => error ? reject(error) : resolve()));
+  }
+
+  /**
+   * Pongs and close replies don't wait and can't fail: LXD may have dropped the connection already,
+   * as it does when a command can't start, and then nobody is left to answer.
+   */
+  private answer(frame: Buffer): void {
+    if (!this.socket.readableEnded) this.socket.write(frame);
   }
 
   /** Data and text messages, in order, until the server closes the stream. */
   async *messages(): AsyncGenerator<Buffer> {
     let fragments: Buffer[] = [];
     for (let frame = await this.readFrame(); frame; frame = await this.readFrame()) {
-      if (frame.code === opcode.ping) await this.write(encodeFrame(opcode.pong, frame.payload));
+      if (frame.code === opcode.ping) this.answer(encodeFrame(opcode.pong, frame.payload));
       else if (frame.code === opcode.close) {
-        await this.close();
-        this.socket.destroy();
+        this.close();
         return;
       } else if (frame.code === opcode.text || frame.code === opcode.binary || frame.code === opcode.continuation) {
         fragments.push(frame.payload);
@@ -128,20 +134,19 @@ export class LxdWebSocket {
         }
       } else if (frame.code !== opcode.pong) throw failure(`unexpected WebSocket opcode ${frame.code}`);
     }
-    if (this.failed) throw this.failed;
   }
 
   async send(data: Uint8Array): Promise<void> {
     await this.write(encodeFrame(opcode.binary, data));
   }
 
-  /** For exec stdin this is end-of-file. */
-  async close(): Promise<void> {
+  /** For exec stdin this is end-of-file. Like a pong it doesn't wait: the command may have exited and taken the stream with it. */
+  close(): void {
     if (this.closeSent) return;
     this.closeSent = true;
     const status = Buffer.alloc(2);
     status.writeUInt16BE(1000);
-    await this.write(encodeFrame(opcode.close, status));
+    this.answer(encodeFrame(opcode.close, status));
     this.socket.end();
   }
 

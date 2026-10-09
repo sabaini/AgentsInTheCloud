@@ -68,7 +68,7 @@ export interface LxdExecProcess {
   stdout: AsyncIterable<Buffer>;
   stderr: AsyncIterable<Buffer>;
   write(data: Uint8Array): Promise<void>;
-  closeStdin(): Promise<void>;
+  closeStdin(): void;
   /** The command's exit status, once LXD reports the operation finished. */
   exited: Promise<number>;
 }
@@ -232,8 +232,12 @@ export class LxdClient extends LxdServerClient {
     const drainControl = async () => { for await (const _ of control!.messages()) { /* nothing on it needs a response */ } };
     // stdout, stderr and control end when LXD closes them. Nothing reads stdin, so release it here.
     const finish = async () => {
-      const [{ metadata: result }] = await Promise.all([this.waitFor(execFinished, started.operation, what), drainControl()]);
+      const [operation, drained] = await Promise.allSettled([this.waitFor(execFinished, started.operation, what), drainControl()]);
+      // LXD's own error explains a broken control stream too, so it comes first.
+      if (operation.status === "rejected") throw operation.reason;
+      const result = operation.value.metadata;
       this.succeeded(result, what);
+      if (drained.status === "rejected") throw drained.reason;
       if (result.metadata?.return === undefined) throw new AgentsInTheCloudCoreError("lxd_unexpected_response", `${what}: LXD reported no exit status`);
       return result.metadata.return;
     };
@@ -257,9 +261,14 @@ export class LxdClient extends LxdServerClient {
     };
     const feed = async () => {
       if (input) await process.write(input);
-      await process.closeStdin();
+      process.closeStdin();
     };
-    const [stdout, stderr] = await Promise.all([collect(process.stdout), collect(process.stderr), feed()]);
-    return { exitCode: await process.exited, stdout, stderr: stderr.toString() };
+    const [stdout, stderr, fed, exited] = await Promise.allSettled([collect(process.stdout), collect(process.stderr), feed(), process.exited]);
+    // A command that couldn't start (say, in a VM still booting) also loses its streams; LXD's own error says why.
+    if (exited.status === "rejected") throw exited.reason;
+    if (stdout.status === "rejected") throw stdout.reason;
+    if (stderr.status === "rejected") throw stderr.reason;
+    if (fed.status === "rejected") throw fed.reason;
+    return { exitCode: exited.value, stdout: stdout.value, stderr: stderr.value.toString() };
   }
 }
