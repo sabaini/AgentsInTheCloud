@@ -7,7 +7,8 @@ import { revealEffectiveSshKeys } from "./ssh-keys.ts";
 import { prepareWorkspaceSshTrust, workspaceGitSshCommand } from "./ssh-host-trust.ts";
 import { SharedSshAgent } from "./shared-ssh-agent.ts";
 
-const containerAgentDir = "/run/agents-in-the-cloud-ssh-agent";
+/** Where a workspace's SSH directory appears inside its container, read-only and live. */
+export const workspaceSshContainerDirectory = "/run/agents-in-the-cloud-ssh-agent";
 let shared: SharedSshAgent | undefined;
 const workspaceKeySources = new Set<(workspaceId: string) => Promise<string[]>>();
 
@@ -23,7 +24,8 @@ async function signingKeys(workspaceTemplateId?: string, workspaceId?: string): 
   return [...await revealEffectiveSshKeys(workspaceTemplateId), ...workspaceKeys.flat()];
 }
 
-function agentDir(workspaceId: string): string {
+/** The host side of a workspace's SSH directory. Modules may add `ssh_config.d/*.conf` files; the workspace's SSH config includes them. */
+export function workspaceSshDirectory(workspaceId: string): string {
   return agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId);
 }
 
@@ -37,7 +39,7 @@ function sshEnvironment(directory: string) {
 export async function workspaceSourceSshEnvironment(workspaceId: string, workspaceTemplateId?: string): Promise<Record<string, string>> {
   // One module owns the signing backend for the lifetime of AgentsInTheCloud, not a workspace.
   shared ??= new SharedSshAgent(agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-signer"), signingKeys);
-  const directory = agentDir(workspaceId);
+  const directory = workspaceSshDirectory(workspaceId);
   await shared.listen(join(directory, "agent.sock"), workspaceTemplateId, workspaceId);
   await prepareWorkspaceSshTrust(directory, workspaceTemplateId);
   await writeFile(join(directory, "workspace_known_hosts"), "", { flag: "wx" }).catch(error => {
@@ -47,7 +49,7 @@ export async function workspaceSourceSshEnvironment(workspaceId: string, workspa
 }
 
 export async function stopWorkspaceSshAgent(workspaceId: string): Promise<void> {
-  await shared?.remove(join(agentDir(workspaceId), "agent.sock"));
+  await shared?.remove(join(workspaceSshDirectory(workspaceId), "agent.sock"));
 }
 
 export async function stopWorkspaceTemplateSshAgents(): Promise<void> {
@@ -59,8 +61,8 @@ export async function stopWorkspaceTemplateSshAgents(): Promise<void> {
 export function registerWorkspaceTemplateSshAgentWorkspaceEvents(events: AgentsInTheCloudEventBus): void {
   events.on("workspace_plan_prepare", async ({ workspaceId, init, plan }) => {
     await workspaceSourceSshEnvironment(workspaceId, workspaceTemplateIdOfInit(init));
-    Object.assign(plan.env, sshEnvironment(containerAgentDir));
-    const directory = agentDir(workspaceId);
+    Object.assign(plan.env, sshEnvironment(workspaceSshContainerDirectory));
+    const directory = workspaceSshDirectory(workspaceId);
     const command = `#!/bin/sh
 set -eu
 host="$1"
@@ -72,10 +74,11 @@ printf '%s\\n' "$keys" | curl --noproxy '*' --fail --silent --show-error --max-t
 `;
     await writeFile(join(directory, "known-hosts-command"), command, { mode: 0o755 });
     // Loopback is the workspace's own container, not a server the user can verify, so keep default OpenSSH behavior there.
-    await writeFile(join(directory, "ssh_config"), `Host * !localhost !127.* !::1\n    KnownHostsCommand /run/agents-in-the-cloud-ssh-agent/known-hosts-command %h %p\n    UserKnownHostsFile /run/agents-in-the-cloud-ssh-agent/known_hosts /run/agents-in-the-cloud-ssh-agent/workspace_known_hosts ~/.ssh/known_hosts\n    StrictHostKeyChecking yes\n`);
+    // Included hosts come first, because OpenSSH keeps the first value it finds for each option.
+    await writeFile(join(directory, "ssh_config"), `Include ${workspaceSshContainerDirectory}/ssh_config.d/*.conf\nHost * !localhost !127.* !::1\n    KnownHostsCommand /run/agents-in-the-cloud-ssh-agent/known-hosts-command %h %p\n    UserKnownHostsFile /run/agents-in-the-cloud-ssh-agent/known_hosts /run/agents-in-the-cloud-ssh-agent/workspace_known_hosts ~/.ssh/known_hosts\n    StrictHostKeyChecking yes\n`);
     plan.containerFiles.push({ source: join(directory, "ssh_config"), target: "/etc/ssh/ssh_config.d/agents-in-the-cloud.conf" });
     plan.initScripts.push("chown root:root /etc/ssh/ssh_config.d/agents-in-the-cloud.conf; chmod 644 /etc/ssh/ssh_config.d/agents-in-the-cloud.conf");
-    plan.mounts.push({ type: "bind", source: dockerHostAgentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId), target: containerAgentDir, readonly: true });
+    plan.mounts.push({ type: "bind", source: dockerHostAgentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId), target: workspaceSshContainerDirectory, readonly: true });
     plan.cleanup.push(() => stopWorkspaceSshAgent(workspaceId));
   });
   events.on("workspace_deleted", async ({ workspaceId }) => stopWorkspaceSshAgent(workspaceId));

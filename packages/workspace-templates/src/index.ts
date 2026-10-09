@@ -80,7 +80,7 @@ export {
 export { effectivePrivateNetworkAccess, formatPrivateNetworkDestination, requestedPrivateNetworkDestination, setPrivateNetworkAccess, type PrivateNetworkDestination } from "./private-network.ts";
 export { defaultChangeBuckets, effectiveChangeBuckets, getChangeBuckets, parseChangeBuckets, setChangeBuckets, type ChangeBucket } from "./change-buckets.ts";
 export { getWorkspaceTemplateSshKnownHosts, setWorkspaceTemplateSshKnownHosts } from "./ssh-host-trust.ts";
-export { registerWorkspaceSshKeySource } from "./ssh-agent.ts";
+export { registerWorkspaceSshKeySource, workspaceSshContainerDirectory, workspaceSshDirectory } from "./ssh-agent.ts";
 export { sshHostTrustFailure, scanSshHost, trustScannedSshHost } from "./ssh-trust-recovery.ts";
 export { onWorkspaceSshTrustChanged, workspaceSshTrustRequests, requestWorkspaceSshTrust, decideWorkspaceSshTrust, cancelWorkspaceSshTrust } from "./ssh-trust-broker.ts";
 export { isSshAuthenticationFailure } from "./git-access-failure.ts";
