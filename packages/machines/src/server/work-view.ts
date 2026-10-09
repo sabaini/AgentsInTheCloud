@@ -50,7 +50,7 @@ function machineRow(workspaceId: string, machine: MachineView): string {
     <div class="managed-list__content">
       <div class="managed-list__label"><span class="managed-list__label-text">${escapeHtml(machine.name)}</span></div>
       <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image}${disks} · ${remaining(machine.expiresAt)}`)}</div>
-      <div class="managed-list__description machines-view__status">${status}</div>
+      <div class="managed-list__description">${status}</div>
     </div>
     <div class="managed-list__actions">${terminal}${release}</div>
   </div>`;
