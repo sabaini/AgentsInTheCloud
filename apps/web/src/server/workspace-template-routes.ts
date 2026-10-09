@@ -5,17 +5,18 @@ import { dialogHtml } from "@agents-in-the-cloud/design-system/dialog";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import {
   addWorkspaceTemplate, createWorkspaceTemplateEnvironmentVariable,
+  createWorkspaceTemplateMachineProfile,
   createWorkspaceTemplateSecret,
   createWorkspaceTemplateSshKey,
-  deleteWorkspaceTemplate, deleteWorkspaceTemplateEnvironmentVariable, deleteWorkspaceTemplateSecret, deleteWorkspaceTemplateSshKey, deriveWorkspaceTemplateSshPublicKey,
+  deleteWorkspaceTemplate, deleteWorkspaceTemplateEnvironmentVariable, deleteWorkspaceTemplateMachineProfile, deleteWorkspaceTemplateSecret, deleteWorkspaceTemplateSshKey, deriveWorkspaceTemplateSshPublicKey,
   getConfiguration, getWorkspaceTemplateConfiguration, getWorkspaceTemplateSshKnownHosts, globalWorkspaceConfiguration, isGlobalScope,
   listWorkspaceTemplates, parseWorkspaceTemplateSpec, renameWorkspaceTemplateSshKey,
   workspaceTemplateSecretPathPermissionSchema,
-  setWorkspaceTemplateDockerfile, setWorkspaceTemplatePreloadImages, setWorkspaceTemplatePrivileged, setWorkspaceTemplateSeedConfigEnabled,
+  setWorkspaceTemplateDockerfile, setWorkspaceTemplateMaxMachines, setWorkspaceTemplatePreloadImages, setWorkspaceTemplatePrivileged, setWorkspaceTemplateSeedConfigEnabled,
   setPrivateNetworkAccess, setWorkspaceTemplateSshKnownHosts, getChangeBuckets, setChangeBuckets,
   updateWorkspaceTemplate,
-  updateWorkspaceTemplateEnvironmentVariable, updateWorkspaceTemplateSecret,
-  type ConfigurationScope, type WorkspaceTemplateEnvironmentVariable, type WorkspaceTemplateSecretInput, type WorkspaceTemplateSecretSummary, type WorkspaceTemplateSshKeySummary, type WorkspaceTemplateSummary,
+  updateWorkspaceTemplateEnvironmentVariable, updateWorkspaceTemplateMachineProfile, updateWorkspaceTemplateSecret,
+  type ConfigurationScope, type WorkspaceTemplateEnvironmentVariable, type WorkspaceTemplateMachineProfile, type WorkspaceTemplateMachineProfileInput, type WorkspaceTemplateSecretInput, type WorkspaceTemplateSecretSummary, type WorkspaceTemplateSshKeySummary, type WorkspaceTemplateSummary,
 } from "@agents-in-the-cloud/workspace-templates";
 import { shouldSearchRepositories, turboStreamResponse } from "@agents-in-the-cloud/shared";
 import { Type } from "typebox";
@@ -25,6 +26,16 @@ import { jsonResponse, matchRoute, replace, response, textResponse, update, want
 
 const jsonStringSchema = Type.String();
 const jsonBooleanSchema = Type.Boolean();
+const jsonNumberSchema = Type.Number();
+const machineTypeSchema = Type.Union([Type.Literal("virtual-machine"), Type.Literal("container")]);
+const machineProfileInputSchema = Type.Object({
+  name: Type.String(),
+  image: Type.String(),
+  type: machineTypeSchema,
+  lxdProfiles: Type.Array(Type.String()),
+  diskSizesGiB: Type.Array(Type.Number()),
+  lifetimeHours: Type.Number(),
+}, { additionalProperties: false });
 
 export type WorkspaceTemplateEditorOptions =
   | { kind: "settings"; workspaceTemplateId: string; section: string | undefined; editor?: string }
@@ -132,16 +143,20 @@ export function createWorkspaceTemplateRoutes(deps: {
     return workspaceTemplateSettingsResponse(request, { workspaceTemplate });
   }
 
-  /** Refresh workspace warnings except for the future-only image preload list. */
-  async function workspaceTemplateSettingsResponse(request: Request, result: { workspaceTemplate: WorkspaceTemplateSummary }): Promise<Response> {
+  type WorkspaceTemplateSettingsResult = { workspaceTemplate: WorkspaceTemplateSummary } | { machineProfile: WorkspaceTemplateMachineProfile; deleted?: true } | { maxMachines: number };
+
+  /** Refresh workspace warnings, except for settings that only shape what comes later: image preloads and machines. */
+  async function workspaceTemplateSettingsResponse(request: Request, result: WorkspaceTemplateSettingsResult): Promise<Response> {
     const url = new URL(request.url);
     const concern = url.pathname.split("/")[3];
-    if (concern !== "preload-images") deps.invalidatePresentation();
+    if (!["preload-images", "machine-profiles", "max-machines"].includes(concern!)) deps.invalidatePresentation();
     if (requestAcceptsJson(request)) return jsonResponse(result);
     const workspaceTemplateId = decodeURIComponent(url.pathname.split("/")[2]!);
-    const section: TemplateSettingsSection = concern === "seed-config" ? "developer" : concern === "privileged" || concern === "dockerfile" || concern === "preload-images" ? "container" : "general";
-    const record = concern === "privileged" ? "docker" : concern === "preload-images" ? "images" : concern === "dockerfile" ? "dockerfile" : undefined;
-    return await settingsPageResponse(request, workspaceTemplateId, section, record, false);
+    const section: TemplateSettingsSection = concern === "seed-config" ? "developer" : concern === "privileged" || concern === "dockerfile" || concern === "preload-images" ? "container" : concern === "machine-profiles" || concern === "max-machines" ? "machines" : "general";
+    // A deleted profile's editor no longer exists, so the list of profiles shows instead.
+    const deleted = url.pathname.endsWith("/delete");
+    const record = deleted ? undefined : concern === "privileged" ? "docker" : concern === "preload-images" ? "images" : concern === "dockerfile" ? "dockerfile" : concern === "max-machines" ? "limit" : "machineProfile" in result ? result.machineProfile.id : undefined;
+    return await settingsPageResponse(request, workspaceTemplateId, section, record, deleted);
   }
 
   type ConfigurationResult = { secret: WorkspaceTemplateSecretSummary; deleted?: true } | { environmentVariable: WorkspaceTemplateEnvironmentVariable; deleted?: true } | { key: WorkspaceTemplateSshKeySummary } | { knownHosts: string } | { privateNetworkAccess: string[] } | { changeBuckets: string };
@@ -237,6 +252,48 @@ export function createWorkspaceTemplateRoutes(deps: {
     if (requestAcceptsJson(request)) await readJsonObject(request);
     const environmentVariable = await deleteWorkspaceTemplateEnvironmentVariable(scope, variableId);
     return configurationSettingsResponse(request, scope, "environment", environmentVariable.id, { deleted: true, environmentVariable });
+  }
+
+  async function workspaceTemplateMachineProfileValues(request: Request): Promise<WorkspaceTemplateMachineProfileInput> {
+    if (requestAcceptsJson(request)) {
+      const body = await readJsonObject(request);
+      if (!Value.Check(machineProfileInputSchema, body)) throw invalidArguments("A machine profile needs name, image, type, lxdProfiles, diskSizesGiB and lifetimeHours");
+      return body;
+    }
+    const formData = await request.formData();
+    const type = String(formData.get("type") ?? "");
+    if (!Value.Check(machineTypeSchema, type)) throw invalidArguments("Type must be virtual-machine or container");
+    const list = (name: string) => String(formData.get(name) ?? "").split(/[\s,]+/).filter(Boolean);
+    return {
+      name: String(formData.get("name") ?? ""),
+      image: String(formData.get("image") ?? ""),
+      type,
+      lxdProfiles: list("lxdProfiles"),
+      diskSizesGiB: list("diskSizesGiB").map(Number),
+      lifetimeHours: Number(formData.get("lifetimeHours") ?? ""),
+    };
+  }
+
+  async function createWorkspaceTemplateMachineProfileEndpoint(workspaceTemplateId: string, request: Request): Promise<Response> {
+    const machineProfile = await createWorkspaceTemplateMachineProfile(workspaceTemplateId, await workspaceTemplateMachineProfileValues(request));
+    return workspaceTemplateSettingsResponse(request, { machineProfile });
+  }
+
+  async function updateWorkspaceTemplateMachineProfileEndpoint(workspaceTemplateId: string, profileId: string, request: Request): Promise<Response> {
+    const machineProfile = await updateWorkspaceTemplateMachineProfile(workspaceTemplateId, profileId, await workspaceTemplateMachineProfileValues(request));
+    return workspaceTemplateSettingsResponse(request, { machineProfile });
+  }
+
+  async function deleteWorkspaceTemplateMachineProfileEndpoint(workspaceTemplateId: string, profileId: string, request: Request): Promise<Response> {
+    if (requestAcceptsJson(request)) await readJsonObject(request);
+    const machineProfile = await deleteWorkspaceTemplateMachineProfile(workspaceTemplateId, profileId);
+    return workspaceTemplateSettingsResponse(request, { deleted: true, machineProfile });
+  }
+
+  async function updateWorkspaceTemplateMaxMachinesEndpoint(workspaceTemplateId: string, request: Request): Promise<Response> {
+    const maxMachines = requestAcceptsJson(request) ? (await readJsonObject(request)).maxMachines : Number((await request.formData()).get("maxMachines") ?? "");
+    if (!Value.Check(jsonNumberSchema, maxMachines)) throw invalidArguments("maxMachines must be a number");
+    return workspaceTemplateSettingsResponse(request, await setWorkspaceTemplateMaxMachines(workspaceTemplateId, maxMachines));
   }
 
   async function workspaceTemplateSecretValues(request: Request): Promise<WorkspaceTemplateSecretInput> {
@@ -415,6 +472,10 @@ export function createWorkspaceTemplateRoutes(deps: {
     if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/preload-images$/)) && request.method === "POST") return await updateWorkspaceTemplatePreloadImagesEndpoint(params[0]!, request);
     if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)$/)) && request.method === "GET" && requestAcceptsJson(request)) return await workspaceTemplateDetailEndpoint(params[0]!);
     if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)$/)) && request.method === "POST") return await updateWorkspaceTemplateEndpoint(params[0]!, request);
+    if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/max-machines$/)) && request.method === "POST") return await updateWorkspaceTemplateMaxMachinesEndpoint(params[0]!, request);
+    if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/machine-profiles$/)) && request.method === "POST") return await createWorkspaceTemplateMachineProfileEndpoint(params[0]!, request);
+    if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/machine-profiles\/([^/]+)$/)) && request.method === "POST") return await updateWorkspaceTemplateMachineProfileEndpoint(params[0]!, params[1]!, request);
+    if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/machine-profiles\/([^/]+)\/delete$/)) && request.method === "POST") return await deleteWorkspaceTemplateMachineProfileEndpoint(params[0]!, params[1]!, request);
     if ((params = matchRoute(url, /^\/workspace-templates\/([^/]+)\/delete$/)) && request.method === "POST") return await deleteWorkspaceTemplateEndpoint(params[0]!, request);
     if ((params = matchRoute(url, /^\/workspace-template-agent-workspaces\/([^/]+)$/)) && request.method === "POST") return await deps.createAgentWorkspace(await workspaceTemplateById(params[0]!), request);
     return undefined;
@@ -424,7 +485,7 @@ export function createWorkspaceTemplateRoutes(deps: {
     try {
       return await handleRoute(request, url);
     } catch (error) {
-      if (!requestAcceptsJson(request) && request.method === "POST" && (url.pathname.startsWith("/workspace-templates/") || url.pathname.startsWith(`${globalWorkspaceSettingsPath}/`)) && error instanceof AgentsInTheCloudCoreError && ["invalid_arguments", "invalid_ssh_private_key", "workspace_template_secret_exists", "workspace_template_environment_variable_exists", "workspace_template_exists", "workspace_template_secret_not_found", "workspace_template_environment_variable_not_found", "workspace_template_ssh_key_not_found"].includes(error.code)) {
+      if (!requestAcceptsJson(request) && request.method === "POST" && (url.pathname.startsWith("/workspace-templates/") || url.pathname.startsWith(`${globalWorkspaceSettingsPath}/`)) && error instanceof AgentsInTheCloudCoreError && ["invalid_arguments", "invalid_ssh_private_key", "workspace_template_secret_exists", "workspace_template_environment_variable_exists", "workspace_template_exists", "workspace_template_secret_not_found", "workspace_template_environment_variable_not_found", "workspace_template_ssh_key_not_found", "workspace_template_machine_profile_exists", "workspace_template_machine_profile_not_found"].includes(error.code)) {
         const errorId = url.pathname.startsWith(`${globalWorkspaceSettingsPath}/`) && !editedTemplateId(globalWorkspaceConfiguration, url) ? globalWorkspaceSettingsErrorId : templateSettingsErrorId;
         return turboStreamResponse(update(errorId, templateSettingsErrorHtml(error.code === "invalid_ssh_private_key" ? "This key couldn’t be read. Paste an unencrypted OpenSSH private key and try again." : error.message)), { status: 422 });
       }

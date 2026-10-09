@@ -68,6 +68,8 @@ const workspaceTemplateDetailResponseSchema = Type.Object({
     seedConfigEnabled: Type.Boolean(),
     environment: Type.Array(environmentVariableSchema),
     secrets: Type.Array(workspaceTemplateSecretSummarySchema),
+    machineProfiles: Type.Array(Type.Object({ id: Type.String(), name: Type.String() })),
+    maxMachines: Type.Number(),
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
 const workspaceTemplateDeletionBlockedResponseSchema = Type.Object({

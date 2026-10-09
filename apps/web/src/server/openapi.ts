@@ -22,7 +22,8 @@ const selectedWorkView = { name: "workView", in: "query", required: false, descr
 const workspaceTemplateId = { name: "workspaceTemplateId", in: "path", required: true, schema: { type: "string" } };
 const variableId = { name: "variableId", in: "path", required: true, schema: { type: "string" } };
 const secretId = { name: "secretId", in: "path", required: true, schema: { type: "string" } };
-const workspaceTemplateSettingsSection = { name: "section", in: "query", required: false, schema: { type: "string", enum: ["index", "general", "global-secrets", "global-ssh", "global-environment", "global-network", "global-buckets", "secrets", "ssh", "environment", "network", "buckets", "container", "developer", "repository", "ssh-keys", "dockerfile", "preload-images", "privileged", "danger"] } };
+const machineProfileId = { name: "profileId", in: "path", required: true, schema: { type: "string" } };
+const workspaceTemplateSettingsSection = { name: "section", in: "query", required: false, schema: { type: "string", enum: ["index", "general", "global-secrets", "global-ssh", "global-environment", "global-network", "global-buckets", "secrets", "ssh", "environment", "network", "buckets", "container", "machines", "developer", "repository", "ssh-keys", "dockerfile", "preload-images", "privileged", "danger"] } };
 const globalViewTemplate = { name: "workspaceTemplate", in: "query", required: false, description: "Browser forms only: re-render this template's settings after the change instead of Settings.", schema: { type: "string" } };
 const settingsSection = { name: "section", in: "query", required: false, schema: { type: "string" } };
 const htmlSurfaceResponses = (description: string) => ({ "200": { description, content: { "text/html": { schema: { type: "string" } } } }, "400": errorResponse, "404": errorResponse });
@@ -108,7 +109,7 @@ export function agentsInTheCloudOpenApi(commands: WorkspaceModuleCommandHandler[
         get: {
           summary: "Present workspace template settings",
           description: "A non-modal settings index with focused section and record editors. Use section=index for the overview; without a section, the overview opens. Use its URL with the presentation tool.",
-          parameters: [workspaceTemplateId, workspaceTemplateSettingsSection, { name: "editor", in: "query", required: false, description: "Record ID or new for Secrets, SSH access and Environment; docker, images or dockerfile for Container.", schema: { type: "string" } }],
+          parameters: [workspaceTemplateId, workspaceTemplateSettingsSection, { name: "editor", in: "query", required: false, description: "Record ID or new for Secrets, SSH access, Environment and Machines; docker, images or dockerfile for Container; limit for the Machines per-workspace limit.", schema: { type: "string" } }],
           responses: htmlSurfaceResponses("AgentsInTheCloud with workspace template settings open"),
         },
       },
@@ -120,6 +121,10 @@ export function agentsInTheCloudOpenApi(commands: WorkspaceModuleCommandHandler[
       "/workspace-templates/{workspaceTemplateId}/environment": { post: { summary: "Create a workspace template environment variable", parameters: [workspaceTemplateId], requestBody: jsonBody({ $ref: "#/components/schemas/EnvironmentVariableInput" }), responses: jsonResponse("Environment variable created", { $ref: "#/components/schemas/EnvironmentVariableEnvelope" }) } },
       "/workspace-templates/{workspaceTemplateId}/environment/{variableId}": { post: { summary: "Update a workspace template environment variable", parameters: [workspaceTemplateId, variableId], requestBody: jsonBody({ $ref: "#/components/schemas/EnvironmentVariableInput" }), responses: jsonResponse("Environment variable updated", { $ref: "#/components/schemas/EnvironmentVariableEnvelope" }) } },
       "/workspace-templates/{workspaceTemplateId}/environment/{variableId}/delete": { post: { summary: "Delete a workspace template environment variable", parameters: [workspaceTemplateId, variableId], requestBody: jsonBody(emptyObjectSchema), responses: jsonResponse("Environment variable deleted", { type: "object", required: ["deleted", "environmentVariable"], properties: { deleted: { const: true }, environmentVariable: { $ref: "#/components/schemas/EnvironmentVariable" } } }) } },
+      "/workspace-templates/{workspaceTemplateId}/machine-profiles": { post: { summary: "Create a machine profile Agents in this template's workspaces may create machines from", description: "Machines are created on the LXD server connected in Settings. Changes apply to machines created afterwards.", parameters: [workspaceTemplateId], requestBody: jsonBody({ $ref: "#/components/schemas/MachineProfileInput" }), responses: jsonResponse("Machine profile created", { $ref: "#/components/schemas/MachineProfileEnvelope" }) } },
+      "/workspace-templates/{workspaceTemplateId}/machine-profiles/{profileId}": { post: { summary: "Update a machine profile", description: "Machines already created from the profile are unchanged.", parameters: [workspaceTemplateId, machineProfileId], requestBody: jsonBody({ $ref: "#/components/schemas/MachineProfileInput" }), responses: jsonResponse("Machine profile updated", { $ref: "#/components/schemas/MachineProfileEnvelope" }) } },
+      "/workspace-templates/{workspaceTemplateId}/machine-profiles/{profileId}/delete": { post: { summary: "Delete a machine profile", description: "Machines already created from the profile keep running until they are released.", parameters: [workspaceTemplateId, machineProfileId], requestBody: jsonBody(emptyObjectSchema), responses: jsonResponse("Machine profile deleted", { type: "object", required: ["deleted", "machineProfile"], properties: { deleted: { const: true }, machineProfile: { $ref: "#/components/schemas/MachineProfile" } } }) } },
+      "/workspace-templates/{workspaceTemplateId}/max-machines": { post: { summary: "Set how many machines one workspace from this template may hold at once", description: "Defaults to 3.", parameters: [workspaceTemplateId], requestBody: jsonBody({ type: "object", required: ["maxMachines"], properties: { maxMachines: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }), responses: jsonResponse("Limit saved", { type: "object", required: ["maxMachines"], properties: { maxMachines: { type: "integer" } } }) } },
       "/workspace-templates/{workspaceTemplateId}/secrets": { post: { summary: "Create a workspace template secret", description: "Omit secretValue to declare a secret without a value. Values are encrypted and never returned.", parameters: [workspaceTemplateId], requestBody: jsonBody({ $ref: "#/components/schemas/CreateSecret" }), responses: jsonResponse("Secret metadata created", { $ref: "#/components/schemas/SecretEnvelope" }) } },
       "/workspace-templates/{workspaceTemplateId}/secrets/{secretId}": { post: { summary: "Update a workspace template secret", description: "Omit secretValue to preserve the stored secret. The value is never returned.", parameters: [workspaceTemplateId, secretId], requestBody: jsonBody({ $ref: "#/components/schemas/UpdateSecret" }), responses: jsonResponse("Secret metadata updated", { $ref: "#/components/schemas/SecretEnvelope" }) } },
       "/workspace-templates/{workspaceTemplateId}/secrets/{secretId}/delete": { post: { summary: "Delete a workspace template secret", parameters: [workspaceTemplateId, secretId], requestBody: jsonBody(emptyObjectSchema), responses: jsonResponse("Secret deleted", { type: "object", required: ["deleted", "secret"], properties: { deleted: { const: true }, secret: { $ref: "#/components/schemas/SecretSummary" } } }) } },
@@ -196,6 +201,26 @@ export function agentsInTheCloudOpenApi(commands: WorkspaceModuleCommandHandler[
         },
         EnvironmentVariableInput: { type: "object", required: ["name", "value"], properties: { name: { type: "string" }, value: { type: "string" } }, additionalProperties: false },
         EnvironmentVariableEnvelope: { type: "object", required: ["environmentVariable"], properties: { environmentVariable: { $ref: "#/components/schemas/EnvironmentVariable" } } },
+        MachineProfileInput: {
+          type: "object",
+          required: ["name", "image", "type", "lxdProfiles", "diskSizesGiB", "lifetimeHours"],
+          properties: {
+            name: { type: "string", pattern: "^[a-z][a-z0-9-]{0,30}$", description: "What Agents ask for when they create a machine" },
+            image: { type: "string", description: "server:alias with server ubuntu, ubuntu-daily or images, such as ubuntu:24.04; a bare alias names an image already on the LXD server" },
+            type: { enum: ["virtual-machine", "container"] },
+            lxdProfiles: { type: "array", minItems: 1, items: { type: "string" }, description: "LXD profiles applied in order; they provide CPU, memory, root disk and network" },
+            diskSizesGiB: { type: "array", maxItems: 16, items: { type: "integer", minimum: 1, maximum: 16384 }, description: "One empty block device per entry" },
+            lifetimeHours: { type: "integer", minimum: 1, maximum: 720, description: "Machines are deleted this long after they are created" },
+          },
+          additionalProperties: false,
+        },
+        MachineProfile: {
+          type: "object",
+          required: ["id", "workspaceTemplateId", "name", "image", "type", "lxdProfiles", "diskSizesGiB", "lifetimeHours", "createdAt", "updatedAt"],
+          properties: { id: { type: "string" }, workspaceTemplateId: { type: "string" }, name: { type: "string" }, image: { type: "string" }, type: { enum: ["virtual-machine", "container"] }, lxdProfiles: { type: "array", items: { type: "string" } }, diskSizesGiB: { type: "array", items: { type: "integer" } }, lifetimeHours: { type: "integer" }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" } },
+          additionalProperties: false,
+        },
+        MachineProfileEnvelope: { type: "object", required: ["machineProfile"], properties: { machineProfile: { $ref: "#/components/schemas/MachineProfile" } } },
         SecretSummary: {
           type: "object",
           required: ["id", "envName", "hostPattern", "createdAt", "updatedAt", "annotation", "configured"],
@@ -207,8 +232,8 @@ export function agentsInTheCloudOpenApi(commands: WorkspaceModuleCommandHandler[
         SecretEnvelope: { type: "object", required: ["secret"], properties: { secret: { $ref: "#/components/schemas/SecretSummary" } } },
         WorkspaceTemplateConfigurationEnvelope: { type: "object", required: ["workspaceTemplate"], properties: { workspaceTemplate: {
           type: "object",
-          required: ["id", "name", "gitUrl", "branch", "sessionShareKey", "environment", "secrets"],
-          properties: { ...workspaceTemplateSummaryProperties, environment: { type: "array", items: { $ref: "#/components/schemas/EnvironmentVariable" } }, secrets: { type: "array", items: { $ref: "#/components/schemas/SecretSummary" } } },
+          required: ["id", "name", "gitUrl", "branch", "sessionShareKey", "environment", "secrets", "machineProfiles", "maxMachines"],
+          properties: { ...workspaceTemplateSummaryProperties, environment: { type: "array", items: { $ref: "#/components/schemas/EnvironmentVariable" } }, secrets: { type: "array", items: { $ref: "#/components/schemas/SecretSummary" } }, machineProfiles: { type: "array", items: { $ref: "#/components/schemas/MachineProfile" } }, maxMachines: { type: "integer", description: "How many machines one workspace may hold at once" } },
           additionalProperties: false,
         } } },
         DeleteWorkspaceTemplateResult: { oneOf: [

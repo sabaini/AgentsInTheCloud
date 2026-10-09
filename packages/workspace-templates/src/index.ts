@@ -23,6 +23,7 @@ export {
   type GitWorkspaceTemplateInitInstruction,
   type WorkspaceTemplateConfiguration,
   type WorkspaceTemplateEnvironmentVariable,
+  type WorkspaceTemplateMachineProfile,
   type WorkspaceTemplateSecretSummary,
   type WorkspaceTemplateSshKeySummary,
   type WorkspaceTemplateSummary,
@@ -43,6 +44,16 @@ export {
   effectiveEnvironment,
   updateWorkspaceTemplateEnvironmentVariable,
 } from "./environment.ts";
+
+export {
+  createWorkspaceTemplateMachineProfile,
+  deleteWorkspaceTemplateMachineProfile,
+  machineImageServers,
+  setWorkspaceTemplateMaxMachines,
+  updateWorkspaceTemplateMachineProfile,
+  type MachineType,
+  type WorkspaceTemplateMachineProfileInput,
+} from "./machine-profiles.ts";
 
 export {
   createWorkspaceTemplateSecret,
