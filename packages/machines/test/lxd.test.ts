@@ -1,14 +1,19 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type TLSSocket } from "node:tls";
 import type { Server, ServerWebSocket } from "bun";
 import type { JsonValue } from "@agents-in-the-cloud/core";
 import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdRequestError, parseLxdTrustToken, type LxdClientCredentials, type LxdServer } from "../src/lxd/index.ts";
 import { LxdWebSocket } from "../src/lxd/websocket.ts";
 
 type Fd = "0" | "1" | "2" | "control";
-interface ExecSession { sockets: Map<Fd, ServerWebSocket<Upgrade>>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
+interface ExecSession { running: boolean; sockets: Map<Fd, ServerWebSocket<Upgrade>>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
+type OperationResult = { status_code: number; err: string; metadata: { return: number } | null };
 interface Upgrade { session: ExecSession; fd: Fd }
 
 const trustSecret = "fake-secret";
@@ -19,12 +24,12 @@ let serverCertificate: string;
 let credentials: LxdClientCredentials;
 let fake: Server<Upgrade>;
 let trusted = false;
-const operations = new Map<string, Promise<{ status_code: number; err: string; metadata: { return: number } | null }>>();
+const operations = new Map<string, Promise<OperationResult | { error: string }>>();
 const execSessions = new Map<string, { session: ExecSession; fd: Fd }>();
 
 const sync = (metadata: JsonValue) => Response.json({ type: "sync", status: "Success", status_code: 200, operation: "", error_code: 0, error: "", metadata });
 const failure = (code: number, error: string) => Response.json({ type: "error", status: "", status_code: 0, operation: "", error_code: code, error, metadata: null }, { status: code });
-function operation(result: Promise<{ status_code: number; err: string; metadata: { return: number } | null }>, metadata: JsonValue = null): Response {
+function operation(result: Promise<OperationResult | { error: string }>, metadata: JsonValue = null): Response {
   const id = crypto.randomUUID();
   operations.set(id, result);
   return Response.json({ type: "async", status: "Operation created", status_code: 100, operation: `/1.0/operations/${id}`, error_code: 0, error: "", metadata: { id, metadata } }, { status: 202 });
@@ -72,17 +77,25 @@ beforeAll(async () => {
         return operation(Promise.resolve(body.name === "broken" ? { status_code: 400, err: "Failed creating instance record: broken image", metadata: null } : { status_code: 200, err: "", metadata: null }));
       }
       if (path === "/1.0/instances/box/files") return url.searchParams.get("path") === "/etc/hostname" ? new Response("box\n") : failure(404, "Not Found");
-      if (path === "/1.0/instances/box/exec" && request.method === "POST") {
-        const session: ExecSession = { sockets: new Map(), opened: Promise.withResolvers(), finished: Promise.withResolvers() };
+      const exec = path.match(/^\/1\.0\/instances\/(box|booting)\/exec$/);
+      if (exec && request.method === "POST") {
+        // A VM whose agent isn't up yet: once the streams connect, LXD closes them all and fails the operation.
+        const running = exec[1] === "box";
+        const session: ExecSession = { running, sockets: new Map(), opened: Promise.withResolvers(), finished: Promise.withResolvers() };
         const fds = Object.fromEntries((["0", "1", "2", "control"] as const).map(fd => {
           const secret = crypto.randomUUID();
           execSessions.set(secret, { session, fd });
           return [fd, secret];
         }));
-        return operation(session.finished.promise.then(() => ({ status_code: 200, err: "", metadata: { return: 3 } })), { fds });
+        return operation(running
+          ? session.finished.promise.then(() => ({ status_code: 200, err: "", metadata: { return: 3 } }))
+          : session.opened.promise.then(() => ({ error: "LXD VM agent is not currently running" })), { fds });
       }
       const wait = path.match(/^\/1\.0\/operations\/([^/]+)\/wait$/);
-      if (wait) return sync(await operations.get(wait[1]!)!);
+      if (wait) {
+        const result = await operations.get(wait[1]!)!;
+        return "error" in result ? failure(500, result.error) : sync(result);
+      }
       if (/^\/1\.0\/operations\/[^/]+\/websocket$/.test(path)) {
         const target = execSessions.get(url.searchParams.get("secret")!);
         if (!target || !server.upgrade(request, { data: target })) return failure(403, "Forbidden");
@@ -93,7 +106,14 @@ beforeAll(async () => {
     websocket: {
       open(socket) {
         socket.data.session.sockets.set(socket.data.fd, socket);
-        if (socket.data.session.sockets.size === 4) socket.data.session.opened.resolve();
+        const { session } = socket.data;
+        if (session.sockets.size < 4) return;
+        session.opened.resolve();
+        if (session.running) return;
+        for (const stream of session.sockets.values()) {
+          stream.close(1000);
+          stream.terminate();
+        }
       },
       // Behaves like `cat`: stdin is echoed to stdout until stdin closes.
       async message(socket, message) {
@@ -101,7 +121,7 @@ beforeAll(async () => {
         if (socket.data.fd === "0") socket.data.session.sockets.get("1")!.send(message);
       },
       async close(socket) {
-        if (socket.data.fd !== "0") return;
+        if (socket.data.fd !== "0" || !socket.data.session.running) return;
         await socket.data.session.opened.promise;
         for (const fd of ["1", "2", "control"] as const) socket.data.session.sockets.get(fd)!.close(1000);
         socket.data.session.finished.resolve();
@@ -174,6 +194,36 @@ test("exec streams large stdin and stdout through pinned WebSockets", async () =
   expect(result.exitCode).toBe(3);
   expect(result.stderr).toBe("");
   expect(result.stdout.equals(input)).toBe(true);
+});
+
+test("exec fails with LXD's error when the command can't start", async () => {
+  await expect(client().run("booting", ["true"])).rejects.toThrow("LXD VM agent is not currently running");
+});
+
+test("a stream LXD pings, closes and drops at once ends without waiting for answers", async () => {
+  // Bun's WebSocket server waits for the client's close frame; LXD doesn't, so this one speaks raw TLS.
+  const tls = await selfSignedServerCertificate("dropping-lxd");
+  const dropping = createServer({ cert: tls.certificate, key: tls.key }, (socket: TLSSocket) => {
+    let request = "";
+    socket.on("data", async (chunk: Buffer) => {
+      request += chunk.toString("latin1");
+      const key = /^sec-websocket-key: *(.+)$/im.exec(request)?.[1];
+      if (!request.includes("\r\n\r\n") || !key) return;
+      const accept = createHash("sha1").update(`${key.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+      socket.write(Buffer.concat([Buffer.from(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`), Buffer.from([0x89, 0x00, 0x88, 0x02, 0x03, 0xe8])]));
+      await Bun.sleep(50);
+      socket.resetAndDestroy();
+    });
+  }).listen(0, "127.0.0.1");
+  await once(dropping, "listening");
+  // SAFETY: listen completed on an explicit TCP address, so address() is an AddressInfo.
+  const address = `127.0.0.1:${(dropping.address() as AddressInfo).port}`;
+  const stream = await LxdWebSocket.connect({ server: { address, certificate: tls.certificate }, credentials }, new URL(`https://${address}/1.0/operations/x/websocket?secret=x`));
+  // Read only once the connection is gone, as when LXD fails an exec before its streams are read.
+  await Bun.sleep(200);
+  expect(await Array.fromAsync(stream.messages())).toEqual([]);
+  stream.close();
+  dropping.close();
 });
 
 test("exec WebSockets refuse a server other than the pinned one", async () => {
