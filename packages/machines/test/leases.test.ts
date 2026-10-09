@@ -21,6 +21,7 @@ function dependencies(overrides: Partial<MachineLeaseDependencies> = {}): Machin
     directory: (workspaceId) => join(directory, workspaceId),
     bootTimeoutMs: 5_000,
     pollMs: 1,
+    changed: async () => undefined,
     ...overrides,
   };
 }

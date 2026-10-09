@@ -15,7 +15,7 @@ function describeMachine(machine: MachineView): string {
   const what = `a ${kind(machine.type)} from ${machine.image}${disks}, made from profile ${machine.profile}, until ${machine.expiresAt}`;
   const snapshots = machine.snapshots.length ? ` Snapshots: ${machine.snapshots.join(", ")}.` : "";
   switch (machine.state) {
-    case "ready": return `${machine.name} is ready: ${what}.${snapshots}`;
+    case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${snapshots}`;
     case "creating": return `${machine.name} is being created: ${what}. Wait for it with wait_for_machine.`;
     case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.`;
     case "stopped": return `${machine.name} is stopped: ${what}.${snapshots}`;
@@ -45,7 +45,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("acquire_machine", (workspaceId) => defineWorkspaceTool({
       name: "acquire_machine",
       label: "Acquire Machine",
-      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Machines log in as ubuntu with passwordless sudo. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
+      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Once it has booted, `ssh <name>` reaches it from this workspace as ubuntu, with passwordless sudo; scp, rsync and tools like juju or ansible can use the name too. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
       parameters: Type.Object({
         profile: Type.String({ description: "Name of the machine profile to use." }),
         name: Type.Optional(Type.String({ description: "Name for the machine: lowercase letters, digits and hyphens. Defaults to the profile name and a number, like node-1." })),

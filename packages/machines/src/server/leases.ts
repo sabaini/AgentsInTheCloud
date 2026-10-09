@@ -47,6 +47,8 @@ export interface MachineLeaseDependencies {
   /** How long cloud-init may take before a machine counts as failed. */
   bootTimeoutMs: number;
   pollMs: number;
+  /** Runs after every change to a workspace's leases, before the change counts as made. */
+  changed(workspaceId: string, leases: MachineLease[]): Promise<void>;
 }
 
 export type MachineState = "creating" | "starting" | "ready" | "stopped" | "failed" | "missing";
@@ -169,6 +171,7 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
 
   async function writeLeases(workspaceId: string, leases: MachineLease[]): Promise<void> {
     await writeJsonAtomic(storePath(workspaceId), { leases });
+    await deps.changed(workspaceId, leases);
   }
 
   async function find(workspaceId: string, name: string): Promise<MachineLease> {
@@ -330,6 +333,8 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
       let name = request.name?.trim() || "";
       for (let number = 1; !name; number++) if (!leases.some((lease) => lease.name === `${profile.name}-${number}`)) name = `${profile.name}-${number}`;
       if (!machineNamePattern.test(name)) throw new AgentsInTheCloudCoreError("invalid_arguments", "Machine names use lowercase letters, digits and hyphens, start with a letter, and have up to 40 characters");
+      // `ssh <name>` reaches the machine, so it mustn't shadow the workspace itself.
+      if (name === "localhost") throw new AgentsInTheCloudCoreError("invalid_arguments", "A machine can't be called localhost");
       if (leases.some((lease) => lease.name === name)) throw refused(`This workspace already has a machine called ${name}`);
       // Refuse before recording anything when no LXD server is connected.
       await deps.lxd();
@@ -399,7 +404,7 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
     });
   }
 
-  return { acquire, list, waitFor, snapshot, restore, release, settings: deps.machineSettings };
+  return { acquire, list, waitFor, snapshot, restore, release, settings: deps.machineSettings, stored: readLeases };
 }
 
 export type MachineLeases = ReturnType<typeof createMachineLeases>;
