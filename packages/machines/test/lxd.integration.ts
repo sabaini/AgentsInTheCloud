@@ -12,7 +12,8 @@ import { parseArgs } from "node:util";
 import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdRequestError } from "../src/lxd/index.ts";
 
 const project = `aitc-it-${randomUUID().slice(0, 8)}`;
-const instance = "machine-1";
+// Unique like the project: LXD wants DNS names unique on the network across projects, kept failed runs included.
+const instance = `machine-${project.slice(-8)}`;
 const pool = "default";
 const volume = `${instance}-disk-1`;
 const { values: options } = parseArgs({ options: { remote: { type: "string" }, image: { type: "string", default: "24.04" } } });

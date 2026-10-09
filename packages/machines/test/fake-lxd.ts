@@ -3,7 +3,7 @@ import { LxdRequestError, type LxdInstance, type LxdInstancesPost } from "../src
 import type { MachineLxd } from "../src/server/leases.ts";
 
 type LxdDevices = Record<string, Record<string, string>>;
-interface FakeInstance extends LxdInstance { post: LxdInstancesPost; snapshots: string[]; probesUntilBooted: number; files: Map<string, string> }
+interface FakeInstance extends LxdInstance { post: LxdInstancesPost; snapshots: string[]; probesUntilBooted: number; cloudInitReadsLeft: number; files: Map<string, string> }
 
 /** Just enough LXD for leases: VMs whose agent answers only after a few probes, like a booting VM. */
 export class FakeLxd implements MachineLxd {
@@ -36,7 +36,7 @@ export class FakeLxd implements MachineLxd {
   }
   async createInstance(post: LxdInstancesPost) {
     if (this.failCreate) throw new LxdRequestError(400, this.failCreate);
-    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, files: new Map(this.hostKeys) });
+    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, cloudInitReadsLeft: 0, files: new Map(this.hostKeys) });
   }
   async setInstanceState(name: string, action: "start" | "stop" | "restart") { this.existing(name).status = action === "stop" ? "Stopped" : "Running"; }
   async deleteInstance(name: string) {
@@ -46,6 +46,13 @@ export class FakeLxd implements MachineLxd {
   async readInstanceFile(name: string, path: string) {
     const instance = this.existing(name);
     if (instance.status !== "Running" || instance.probesUntilBooted-- > 0) throw new LxdRequestError(500, "LXD VM agent is not currently running");
+    // Once the agent answers, cloud-init may still be running this boot: only its result in /run says when it's done.
+    if (path === "/run/cloud-init/result.json") {
+      if (instance.cloudInitReadsLeft <= 0) return Buffer.from("../../var/lib/cloud/data/result.json");
+      instance.cloudInitReadsLeft--;
+      return undefined;
+    }
+    // Left on disk by an earlier boot.
     if (path === "/var/lib/cloud/instance/boot-finished") return Buffer.from("done");
     const file = instance.files.get(path);
     return file === undefined ? undefined : Buffer.from(file);

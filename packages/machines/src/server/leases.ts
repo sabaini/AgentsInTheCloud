@@ -67,7 +67,12 @@ export interface MachineView {
 
 const machineNamePattern = /^[a-z][a-z0-9-]{0,39}$/;
 const snapshotNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
-const bootFinishedPath = "/var/lib/cloud/instance/boot-finished";
+/**
+ * cloud-init writes this on tmpfs once it has finished the current boot. Its boot-finished file can't
+ * tell: it stays on disk from the previous boot until a few seconds into this one, when LXD's agent
+ * already answers and sshd isn't listening yet.
+ */
+const cloudInitResultPath = "/run/cloud-init/result.json";
 const hostKeyPaths = ["ed25519", "ecdsa", "rsa"].map((type) => `/etc/ssh/ssh_host_${type}_key.pub`);
 const probeTimeoutMs = 15_000;
 
@@ -214,7 +219,7 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
   async function probe(lxd: MachineLxd, instance: string, signal: AbortSignal): Promise<string[] | undefined> {
     try {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(probeTimeoutMs)]);
-      if (!await lxd.readInstanceFile(instance, bootFinishedPath, attempt)) return undefined;
+      if (!await lxd.readInstanceFile(instance, cloudInitResultPath, attempt)) return undefined;
       const keys = await Promise.all(hostKeyPaths.map((path) => lxd.readInstanceFile(instance, path, attempt)));
       return keys.flatMap((key) => key ? [key.toString("utf8").trim().split(/\s+/).slice(0, 2).join(" ")] : []);
     } catch (error) {

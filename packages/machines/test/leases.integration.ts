@@ -17,7 +17,8 @@ import { createMachineLeases, machineInstanceName } from "../src/server/leases.t
 import { createMachineTunnels } from "../src/server/tunnels.ts";
 
 const project = `aitc-it-${randomUUID().slice(0, 8)}`;
-const workspaceId = "integration";
+// Instance names come from it, and LXD wants their DNS names unique on the network across projects, kept failed runs included.
+const workspaceId = project;
 const { values: options } = parseArgs({ options: { remote: { type: "string" }, image: { type: "string", default: "24.04" } } });
 const on = (name = "") => options.remote ? `${options.remote}:${name}` : name;
 const cleanup: string[][] = [];
@@ -72,7 +73,11 @@ try {
   };
   const nodeInstance = machineInstanceName(workspaceId, "node-1");
   const probeInstance = machineInstanceName(workspaceId, "probe-1");
-  cleanup.unshift(["delete", "--force", "--project", project, on(nodeInstance)], ["delete", "--force", "--project", project, on(probeInstance)]);
+  cleanup.unshift(
+    ["delete", "--force", "--project", project, on(nodeInstance)],
+    ["delete", "--force", "--project", project, on(probeInstance)],
+    ...[1, 2].map((disk) => ["storage", "volume", "delete", on("default"), `${nodeInstance}-disk${disk}`, "--project", project]),
+  );
 
   const node = await step(`acquire a VM from ubuntu:${options.image} with 2 and 3 GiB disks`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
   assert.equal(node.state, "ready", JSON.stringify(node));
@@ -115,7 +120,7 @@ try {
   await step("release both, with their disks", async () => {
     await leases.release(workspaceId, "node-1");
     await leases.release(workspaceId, "probe-1");
-    cleanup.splice(0, 2);
+    cleanup.splice(0, 4);
     assert.deepEqual(await leases.list(workspaceId), []);
     assert.equal(await lxc("list", "--project", project, on(), "-c", "n", "-f", "csv"), "");
     assert.equal(await lxc("storage", "volume", "list", on("default"), "--project", project, "-c", "n", "-f", "csv"), "");

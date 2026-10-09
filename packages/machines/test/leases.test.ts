@@ -152,8 +152,10 @@ test("parking stops ready machines, and their next use starts them again", async
 
   const node = lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!;
   node.probesUntilBooted = 2;
+  node.cloudInitReadsLeft = 3;
   await leases.usable("w1", "node-1", 5_000);
   expect(node.status).toBe("Running");
+  expect(node.cloudInitReadsLeft).toBe(0);
   expect((await leases.list("w1"))[0]!.state).toBe("ready");
 
   node.status = "Stopped";
