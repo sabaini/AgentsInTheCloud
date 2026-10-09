@@ -120,6 +120,26 @@ describe("shared workspace-aware SSH agent", () => {
     }
   });
 
+  test("a workspace's own keys are signed for that workspace only, even within one template", async () => {
+    const [template, machine] = await Promise.all([userKey(directory, "template"), userKey(directory, "machine")]);
+    const scoped = new SharedSshAgent(join(directory, "scoped-backend"), async (workspaceTemplateId, workspaceId) => [
+      ...(workspaceTemplateId === "t" ? [template.private] : []),
+      ...(workspaceId === "w1" ? [machine.private] : []),
+    ]);
+    try {
+      await Promise.all([scoped.listen(join(directory, "w1.sock"), "t", "w1"), scoped.listen(join(directory, "w2.sock"), "t", "w2")]);
+      const [w1, w2] = [new Client(join(directory, "w1.sock")), new Client(join(directory, "w2.sock"))];
+      clients.push(w1, w2);
+      expect(keyBlobs(await w1.request(identities)).sort()).toEqual([template.blob.toString("base64"), machine.blob.toString("base64")].sort());
+      expect(keyBlobs(await w2.request(identities))).toEqual([template.blob.toString("base64")]);
+      expect((await w1.request(signRequest(machine.blob)))[0]).toBe(14);
+      expect((await w2.request(signRequest(machine.blob)))[0]).toBe(5);
+    } finally {
+      for (const connection of clients.splice(0)) connection.close();
+      await scoped.close();
+    }
+  });
+
   test("clients cannot mutate, lock, or invoke arbitrary backend extensions", async () => {
     const key = await userKey(directory, "key"); keys.set("a", [key.private]);
     const connection = await client("a");

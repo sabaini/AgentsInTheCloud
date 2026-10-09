@@ -61,7 +61,7 @@ export class SharedSshAgent {
   private exitHandler = () => { this.child?.kill("SIGTERM"); };
   private signalHandlers = new Map<NodeJS.Signals, () => void>();
 
-  constructor(private directory: string, private loadKeys: (workspaceTemplateId?: string) => Promise<string[]>) {
+  constructor(private directory: string, private loadKeys: (workspaceTemplateId?: string, workspaceId?: string) => Promise<string[]>) {
     this.backendPath = join(directory, "signer.sock");
     process.on("exit", this.exitHandler);
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -131,9 +131,9 @@ export class SharedSshAgent {
     throw new AgentsInTheCloudCoreError("ssh_agent_failed", "Timed out waiting for shared SSH signing backend");
   }
 
-  private async synchronize(child: ChildProcess, workspaceTemplateId?: string): Promise<void> {
+  private async synchronize(child: ChildProcess, workspaceTemplateId?: string, workspaceId?: string): Promise<void> {
     // Read persisted authorization for EVERY request, including cached-key signing.
-    const keys = await this.loadKeys(workspaceTemplateId);
+    const keys = await this.loadKeys(workspaceTemplateId, workspaceId);
     const digest = createHash("sha256").update(JSON.stringify(keys)).digest("hex");
     if (digest === this.loadedKeys) return;
     this.loadedKeys = undefined;
@@ -143,7 +143,7 @@ export class SharedSshAgent {
     this.loadedKeys = digest;
   }
 
-  private async serve(client: Socket, workspaceTemplateId?: string): Promise<void> {
+  private async serve(client: Socket, workspaceTemplateId?: string, workspaceId?: string): Promise<void> {
     let upstream: Socket | undefined;
     let responses: AsyncGenerator<Buffer> | undefined;
     try {
@@ -165,7 +165,7 @@ export class SharedSshAgent {
             });
             responses = packets(upstream);
           }
-          await this.synchronize(child, workspaceTemplateId);
+          await this.synchronize(child, workspaceTemplateId, workspaceId);
           if (client.destroyed || this.child !== child) return failure;
           upstream.write(packet(body));
           const response = await responses!.next();
@@ -187,7 +187,8 @@ export class SharedSshAgent {
     }
   }
 
-  async listen(socketPath: string, workspaceTemplateId?: string): Promise<void> {
+  /** Clients of this socket may sign with their template's keys and, given a workspace, keys only that workspace may use. */
+  async listen(socketPath: string, workspaceTemplateId?: string, workspaceId?: string): Promise<void> {
     await this.exclusive(async () => {
       if (this.listeners.has(socketPath)) return;
       await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
@@ -196,7 +197,7 @@ export class SharedSshAgent {
       const server = createServer((client) => {
         clients.add(client);
         client.once("close", () => clients.delete(client));
-        void this.serve(client, workspaceTemplateId);
+        void this.serve(client, workspaceTemplateId, workspaceId);
       });
       try {
         await new Promise<void>((resolve, reject) => {

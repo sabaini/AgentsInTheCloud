@@ -329,9 +329,12 @@
     "packages/machines": {
       "name": "@agents-in-the-cloud/machines",
       "dependencies": {
+        "@agents-in-the-cloud/agent": "workspace:*",
         "@agents-in-the-cloud/core": "workspace:*",
         "@agents-in-the-cloud/design-system": "workspace:*",
         "@agents-in-the-cloud/shared": "workspace:*",
+        "@agents-in-the-cloud/workspace": "workspace:*",
+        "@agents-in-the-cloud/workspace-templates": "workspace:*",
         "typebox": "^1.0.57",
       },
     },

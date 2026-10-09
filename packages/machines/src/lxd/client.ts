@@ -17,6 +17,7 @@ export class LxdRequestError extends AgentsInTheCloudCoreError {
 /** The subset of LXD's InstancesPost that AITC sends. */
 export interface LxdInstancesPost {
   name: string;
+  description?: string;
   type: "container" | "virtual-machine";
   source: { type: "image"; alias: string; server?: string; protocol?: "simplestreams" | "lxd" };
   profiles?: string[];
@@ -59,6 +60,7 @@ const instanceSchema = Type.Object({
 export type LxdInstance = Static<typeof instanceSchema>;
 const instanceResponse = syncResponse(instanceSchema);
 const instancesResponse = syncResponse(Type.Array(instanceSchema));
+const profileResponse = syncResponse(Type.Object({ devices: Type.Record(Type.String(), Type.Record(Type.String(), Type.String())) }));
 const instanceSnapshotsResponse = syncResponse(Type.Object({ snapshots: Type.Union([Type.Array(Type.Object({ name: Type.String() })), Type.Null()]) }));
 const execStarted = asyncResponse(Type.Object({ fds: Type.Object({ "0": Type.String(), "1": Type.String(), "2": Type.String(), control: Type.String() }) }));
 // A failed exec reports no exit status.
@@ -85,9 +87,10 @@ export class LxdServerClient {
     return url;
   }
 
-  protected async send(method: string, path: string, body?: LxdRequestBody, query?: Record<string, string>): Promise<Response> {
+  protected async send(method: string, path: string, body?: LxdRequestBody, query?: Record<string, string>, signal?: AbortSignal): Promise<Response> {
     return await fetch(this.url(path, query), {
       method,
+      signal,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       tls: lxdFetchTls(this.identity),
@@ -171,6 +174,11 @@ export class LxdClient extends LxdServerClient {
     return (await this.get(instanceResponse, `/1.0/instances/${name(instance)}`)).metadata;
   }
 
+  /** An LXD profile's devices. With features.profiles off, the project shares the default project's profiles. */
+  async profileDevices(profile: string): Promise<Record<string, Record<string, string>>> {
+    return (await this.get(profileResponse, `/1.0/profiles/${name(profile)}`)).metadata.devices;
+  }
+
   async createInstance(post: LxdInstancesPost): Promise<void> {
     await this.perform("POST", "/1.0/instances", post);
   }
@@ -185,9 +193,9 @@ export class LxdClient extends LxdServerClient {
     await this.perform("DELETE", `/1.0/instances/${name(instance)}`);
   }
 
-  /** The file's contents, or undefined if it doesn't exist (yet). */
-  async readInstanceFile(instance: string, path: string): Promise<Buffer | undefined> {
-    const response = await this.send("GET", `/1.0/instances/${name(instance)}/files`, undefined, { path });
+  /** The file's contents, or undefined if it doesn't exist (yet). A VM's files come through its LXD agent, which may not be running. */
+  async readInstanceFile(instance: string, path: string, signal?: AbortSignal): Promise<Buffer | undefined> {
+    const response = await this.send("GET", `/1.0/instances/${name(instance)}/files`, undefined, { path }, signal);
     if (response.ok) return Buffer.from(await response.arrayBuffer());
     if (response.status === 404) return undefined;
     // Every other status carries an error envelope, which receive throws.
