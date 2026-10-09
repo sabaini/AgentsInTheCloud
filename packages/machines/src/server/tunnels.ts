@@ -10,6 +10,8 @@ export type MachineTunnelLxd = Pick<LxdClient, "exec">;
 
 export interface MachineTunnelDependencies {
   lxd(): Promise<MachineTunnelLxd>;
+  /** Waits until the machine can take a connection, starting it if it's stopped. */
+  usable(workspaceId: string, name: string): Promise<void>;
   /** The workspace's SSH directory on this host. */
   hostDirectory(workspaceId: string): string;
   /** The same directory inside the workspace container. */
@@ -41,14 +43,18 @@ function sshConfig(leases: MachineLease[], directory: string): string {
   return `# This workspace's machines. AgentsInTheCloud rewrites this file as they come and go.\n${hosts.join("")}`;
 }
 
-/** One Unix socket per ready machine in its workspace's SSH directory, plus the SSH config and host keys to use them. */
-export function createMachineTunnels(deps: MachineTunnelDependencies) {
-  const servers = new Map<string, Map<string, Server>>();
+interface Tunnel { server: Server; clients: Set<Socket> }
 
-  async function relay(client: Socket, instance: string): Promise<void> {
+/** One Unix socket per machine in its workspace's SSH directory, plus the SSH config and host keys to use them. */
+export function createMachineTunnels(deps: MachineTunnelDependencies) {
+  const tunnels = new Map<string, Map<string, Tunnel>>();
+
+  async function relay(client: Socket, workspaceId: string, lease: MachineLease): Promise<void> {
+    const { instance } = lease;
     // Reads and writes report their own failures, such as ssh exiting mid-reply; without a listener the same error would crash the process.
     client.on("error", () => {});
     try {
+      await deps.usable(workspaceId, lease.name);
       const process = await (await deps.lxd()).exec(instance, sshCommand);
       const toMachine = async () => {
         try {
@@ -77,46 +83,56 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
     }
   }
 
-  async function listen(path: string, instance: string): Promise<Server> {
+  async function listen(path: string, workspaceId: string, lease: MachineLease): Promise<Tunnel> {
     await rm(path, { force: true });
+    const clients = new Set<Socket>();
     // Each direction ends on its own: the client finishing sending doesn't end the machine's reply.
-    const server = createServer({ allowHalfOpen: true }, (client) => void relay(client, instance));
+    const server = createServer({ allowHalfOpen: true }, (client) => {
+      clients.add(client);
+      client.once("close", () => clients.delete(client));
+      void relay(client, workspaceId, lease);
+    });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(path, resolve);
     });
     await chmod(path, 0o600);
-    return server;
+    return { server, clients };
   }
 
-  async function stop(server: Server, path: string): Promise<void> {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  /** Cuts open connections too: closing alone would wait for them, and one may be waiting for this very change. */
+  async function stop(tunnel: Tunnel, path: string): Promise<void> {
+    for (const client of tunnel.clients) client.destroy();
+    await new Promise<void>((resolve, reject) => tunnel.server.close((error) => error ? reject(error) : resolve()));
     await rm(path, { force: true });
   }
 
-  /** Match the workspace's sockets and SSH config to its ready machines. */
+  /** Match the workspace's sockets and SSH config to its machines. A machine that has booted once keeps its socket while it restarts, so connections can wait for it. */
   async function sync(workspaceId: string, leases: MachineLease[]): Promise<void> {
-    const ready = leases.filter((lease) => lease.status === "ready");
+    const reachable = leases.filter((lease) => lease.hostKeys.length > 0);
     const directory = join(deps.hostDirectory(workspaceId), "machines");
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const current = servers.get(workspaceId) ?? new Map<string, Server>();
-    servers.set(workspaceId, current);
-    for (const [name, server] of current) {
-      if (ready.some((lease) => lease.name === name)) continue;
+    const current = tunnels.get(workspaceId) ?? new Map<string, Tunnel>();
+    tunnels.set(workspaceId, current);
+    for (const [name, tunnel] of current) {
+      if (reachable.some((lease) => lease.name === name)) continue;
       current.delete(name);
-      await stop(server, join(directory, socketName(name)));
+      await stop(tunnel, join(directory, socketName(name)));
     }
-    for (const lease of ready) {
-      if (!current.has(lease.name)) current.set(lease.name, await listen(join(directory, socketName(lease.name)), lease.instance));
+    for (const lease of reachable) {
+      if (!current.has(lease.name)) current.set(lease.name, await listen(join(directory, socketName(lease.name)), workspaceId, lease));
     }
-    await writeFileAtomic(join(directory, "known_hosts"), ready.flatMap((lease) => lease.hostKeys.map((key) => `${lease.name} ${key}\n`)).join(""), { mode: 0o644 });
-    await writeFileAtomic(join(deps.hostDirectory(workspaceId), "ssh_config.d", "machines.conf"), sshConfig(ready, deps.containerDirectory), { mode: 0o644 });
+    await writeFileAtomic(join(directory, "known_hosts"), reachable.flatMap((lease) => lease.hostKeys.map((key) => `${lease.name} ${key}\n`)).join(""), { mode: 0o644 });
+    await writeFileAtomic(join(deps.hostDirectory(workspaceId), "ssh_config.d", "machines.conf"), sshConfig(reachable, deps.containerDirectory), { mode: 0o644 });
   }
 
+  /** For a workspace that's gone: its sockets, host keys and SSH config entries go too. */
   async function close(workspaceId: string): Promise<void> {
-    const current = servers.get(workspaceId);
-    servers.delete(workspaceId);
-    for (const [name, server] of current ?? []) await stop(server, join(deps.hostDirectory(workspaceId), "machines", socketName(name)));
+    const current = tunnels.get(workspaceId);
+    tunnels.delete(workspaceId);
+    for (const [name, tunnel] of current ?? []) await stop(tunnel, join(deps.hostDirectory(workspaceId), "machines", socketName(name)));
+    await rm(join(deps.hostDirectory(workspaceId), "machines"), { recursive: true, force: true });
+    await rm(join(deps.hostDirectory(workspaceId), "ssh_config.d", "machines.conf"), { force: true });
   }
 
   return { sync, close };

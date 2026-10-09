@@ -42,8 +42,8 @@ beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), "machines-tunn
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
 
 test("ready machines get a socket relayed into the machine, an SSH host entry and their host keys", async () => {
-  const tunnels = createMachineTunnels({ lxd: async () => lxd, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
-  await tunnels.sync("w1", [lease("node-1", "ready"), lease("node-2", "starting")]);
+  const tunnels = createMachineTunnels({ lxd: async () => lxd, usable: async () => undefined, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  await tunnels.sync("w1", [lease("node-1", "ready"), { ...lease("node-2", "starting"), hostKeys: [] }]);
 
   const config = await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8");
   const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(config)![1]!;
@@ -65,5 +65,30 @@ test("ready machines get a socket relayed into the machine, an SSH host entry an
   expect(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8")).not.toContain("node-1");
   expect((await readdir(join(directory, "machines"))).filter((file) => file.endsWith(".sock"))).toHaveLength(1);
   await tunnels.close("w1");
-  expect((await readdir(join(directory, "machines"))).filter((file) => file.endsWith(".sock"))).toEqual([]);
+  expect(await readdir(directory)).toEqual(["ssh_config.d"]);
+  expect(await readdir(join(directory, "ssh_config.d"))).toEqual([]);
+});
+
+test("a connection waiting for its machine to restart doesn't hold up the lease change that restart makes", async () => {
+  let tunnels!: ReturnType<typeof createMachineTunnels>;
+  // Waking a stopped machine marks it starting, which resyncs the tunnels while this connection waits.
+  const usable = async (workspaceId: string, name: string) => { await tunnels.sync(workspaceId, [lease(name, "starting")]); };
+  tunnels = createMachineTunnels({ lxd: async () => lxd, usable, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  await tunnels.sync("w1", [lease("node-1", "ready")]);
+  const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
+  const client = connect(join(directory, "machines", socket));
+  await once(client, "connect");
+  const received = (async () => Buffer.concat(await Array.fromAsync(client)))();
+  client.end(Buffer.from("SSH-2.0-test\r\n"));
+  expect((await received).toString()).toBe("SSH-2.0-test\r\n");
+
+  // Releasing cuts connections instead of waiting for them.
+  const lingering = connect(join(directory, "machines", socket));
+  await once(lingering, "connect");
+  lingering.write("still here");
+  await once(lingering, "data");
+  const closed = once(lingering, "close");
+  await tunnels.sync("w1", []);
+  await closed;
+  await tunnels.close("w1");
 });

@@ -53,7 +53,7 @@ try {
 
   // On this host, the workspace's SSH directory and the one its container would see are the same.
   const sshDirectory = join(directory, "ssh");
-  const tunnels = createMachineTunnels({ lxd: async () => lxd, hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
+  const tunnels = createMachineTunnels({ lxd: async () => lxd, usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
   const leases = createMachineLeases({
     lxd: async () => lxd,
     machineSettings: async () => ({ profiles: [profile({ name: "node", diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
@@ -64,7 +64,8 @@ try {
     changed: tunnels.sync,
   });
   const ssh = async (input: Buffer<ArrayBuffer> | undefined, ...args: string[]) => {
-    const child = Bun.spawn(["ssh", "-F", join(sshDirectory, "ssh_config.d", "machines.conf"), "-i", keyPath, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "node-1", ...args], { stdin: input ? new Blob([input]) : "ignore", stdout: "pipe", stderr: "pipe" });
+    // A connection that never gets anywhere fails the test instead of stalling it.
+    const child = Bun.spawn(["timeout", "600", "ssh", "-F", join(sshDirectory, "ssh_config.d", "machines.conf"), "-i", keyPath, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "node-1", ...args], { stdin: input ? new Blob([input]) : "ignore", stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     assert.equal(code, 0, stderr);
     return stdout.trim();
@@ -89,6 +90,14 @@ try {
     assert.equal(await ssh(undefined, "sudo", "-n", "whoami"), "root");
     const payload = Buffer.alloc(8 * 1024 * 1024, "machines tunnel\n");
     assert.equal((await ssh(payload, "sha256sum")).split(" ")[0], new Bun.CryptoHasher("sha256").update(payload).digest("hex"));
+  });
+
+  await step("parking stops the VM, and the next ssh starts it again", async () => {
+    await leases.stopAll(workspaceId);
+    assert.equal((await lxd.instance(nodeInstance)).status, "Stopped");
+    assert.equal((await leases.list(workspaceId))[0]!.state, "stopped");
+    assert.equal(await ssh(undefined, "hostname"), "node-1");
+    assert.equal((await leases.list(workspaceId))[0]!.state, "ready");
   });
 
   const probe = await step("acquire a container", () => leases.acquire(workspaceId, { profile: "probe" }, 10 * 60_000));

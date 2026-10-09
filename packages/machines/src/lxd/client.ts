@@ -56,6 +56,8 @@ const instanceSchema = Type.Object({
   type: Type.String(),
   status: Type.String(),
   config: Type.Record(Type.String(), Type.String()),
+  /** The instance's own devices, without those its profiles add. */
+  devices: Type.Record(Type.String(), Type.Record(Type.String(), Type.String())),
 });
 export type LxdInstance = Static<typeof instanceSchema>;
 const instanceResponse = syncResponse(instanceSchema);

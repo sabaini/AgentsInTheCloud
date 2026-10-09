@@ -36,7 +36,7 @@ export class FakeLxd implements MachineLxd {
   }
   async createInstance(post: LxdInstancesPost) {
     if (this.failCreate) throw new LxdRequestError(400, this.failCreate);
-    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, files: new Map(this.hostKeys) });
+    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, files: new Map(this.hostKeys) });
   }
   async setInstanceState(name: string, action: "start" | "stop" | "restart") { this.existing(name).status = action === "stop" ? "Stopped" : "Running"; }
   async deleteInstance(name: string) {

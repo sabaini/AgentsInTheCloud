@@ -12,6 +12,7 @@
     "@agents-in-the-cloud/shared": "workspace:*",
     "@agents-in-the-cloud/workspace": "workspace:*",
     "@agents-in-the-cloud/workspace-templates": "workspace:*",
+    "@agents-in-the-cloud/workspace-terminal": "workspace:*",
     "typebox": "^1.0.57"
   }
 }

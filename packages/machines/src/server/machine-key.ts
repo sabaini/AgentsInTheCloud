@@ -1,10 +1,22 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { AgentsInTheCloudCoreError, agentsInTheCloudDataPath, getAgentsInTheCloudRuntimeContext, readTextIfExists } from "@agents-in-the-cloud/core";
+import { AgentsInTheCloudCoreError, agentsInTheCloudDataPath, getAgentsInTheCloudRuntimeContext, isNotFoundError, readTextIfExists } from "@agents-in-the-cloud/core";
+
+const workspacesDirectory = () => agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "machines", "workspaces");
 
 /** Machine state for one workspace: its leases and the key its machines trust. Outside every Agent sandbox. */
 export function workspaceMachinesDirectory(workspaceId: string): string {
-  return agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "machines", "workspaces", workspaceId);
+  return join(workspacesDirectory(), workspaceId);
+}
+
+/** Workspaces with machine state; it goes when the workspace does. */
+export async function workspacesWithMachines(): Promise<string[]> {
+  try {
+    return await readdir(workspacesDirectory());
+  } catch (error) {
+    if (isNotFoundError(error)) return [];
+    throw error;
+  }
 }
 
 const keyPath = (workspaceId: string) => join(workspaceMachinesDirectory(workspaceId), "id_ed25519");

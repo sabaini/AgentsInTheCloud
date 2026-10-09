@@ -103,14 +103,18 @@ async function rootDiskPool(lxd: MachineLxd, profiles: string[]): Promise<string
   let pool: string | undefined;
   // Later profiles override earlier ones, as when LXD applies them.
   for (const profile of profiles) {
-    const root = Object.values(await lxd.profileDevices(profile)).find((device) => device.type === "disk" && device.path === "/");
+    const devices = await lxd.profileDevices(profile).catch((error: Error) => {
+      throw isMissing(error) ? refused(`The LXD server has no profile called ${profile}. Create it there, or change the machine profile in the template's settings.`) : error;
+    });
+    const root = Object.values(devices).find((device) => device.type === "disk" && device.path === "/");
     if (root?.pool) pool = root.pool;
   }
   if (!pool) throw refused(`None of the LXD profiles ${profiles.join(", ")} gives machines a root disk, so there's no storage pool for their extra disks`);
   return pool;
 }
 
-async function removeInstance(lxd: MachineLxd, instance: string): Promise<void> {
+/** Stops the instance if it's running and deletes it with its snapshots; one that's already gone is fine. */
+export async function removeInstance(lxd: MachineLxd, instance: string): Promise<void> {
   let current: LxdInstance;
   try {
     current = await lxd.instance(instance);
@@ -382,6 +386,55 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
     return await view(workspaceId, name);
   }
 
+  /**
+   * Starts machines that are stopped, for example since their workspace was parked, and waits up to
+   * `waitMs` for them to boot. Without `names`, wakes all of the workspace's machines.
+   */
+  async function wake(workspaceId: string, names?: string[], waitMs = 0, signal?: AbortSignal): Promise<void> {
+    if (!(await readLeases(workspaceId)).length) return;
+    const lxd = await deps.lxd();
+    const woken = await serialize(workspaceId, async () => {
+      const leases = await readLeases(workspaceId);
+      const statuses = new Map((await lxd.instances()).map((instance) => [instance.name, instance.status]));
+      const stopped = leases.filter((lease) => lease.status === "ready" && statuses.get(lease.instance) === "Stopped" && (!names || names.includes(lease.name)));
+      for (const lease of stopped) {
+        await lxd.setInstanceState(lease.instance, "start");
+        lease.status = "starting";
+      }
+      if (stopped.length) await writeLeases(workspaceId, leases);
+      return stopped.map((lease) => lease.name);
+    });
+    const booting = woken.map((name) => start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal))));
+    if (booting.length) await within(Promise.all(booting.map((task) => task.done)).then(() => undefined), waitMs, signal);
+  }
+
+  /** For a new connection: starts the machine if it's stopped and waits while it boots. */
+  async function usable(workspaceId: string, name: string, waitMs: number): Promise<void> {
+    await wake(workspaceId, [name], waitMs);
+    const task = tasks.get(taskKey(workspaceId, name));
+    if (task) await within(task.done, waitMs);
+  }
+
+  /** Shuts down a workspace's running machines, as when it's parked. Their next use starts them again. */
+  async function stopAll(workspaceId: string): Promise<void> {
+    const leases = await readLeases(workspaceId);
+    if (!leases.length) return;
+    const lxd = await deps.lxd();
+    const statuses = new Map((await lxd.instances()).map((instance) => [instance.name, instance.status]));
+    await Promise.all(leases.filter((lease) => lease.status === "ready" && statuses.get(lease.instance) === "Running").map((lease) => lxd.setInstanceState(lease.instance, "stop")));
+  }
+
+  /** Releases the machines whose lifetime is over, returning their names. */
+  async function expire(workspaceId: string, now: number): Promise<string[]> {
+    const expired = (await readLeases(workspaceId)).filter((lease) => lease.expiresAt <= now);
+    for (const lease of expired) await release(workspaceId, lease.name);
+    return expired.map((lease) => lease.name);
+  }
+
+  async function releaseAll(workspaceId: string): Promise<void> {
+    for (const lease of await readLeases(workspaceId)) await release(workspaceId, lease.name);
+  }
+
   /** Deletes the machine, its disks and its snapshots. A machine still being created is finished first. */
   async function release(workspaceId: string, name: string): Promise<void> {
     const task = tasks.get(taskKey(workspaceId, name));
@@ -404,7 +457,7 @@ export function createMachineLeases(deps: MachineLeaseDependencies) {
     });
   }
 
-  return { acquire, list, waitFor, snapshot, restore, release, settings: deps.machineSettings, stored: readLeases };
+  return { acquire, list, waitFor, snapshot, restore, release, wake, usable, stopAll, expire, releaseAll, settings: deps.machineSettings, stored: readLeases };
 }
 
 export type MachineLeases = ReturnType<typeof createMachineLeases>;

@@ -386,6 +386,8 @@ describe("HTTP contracts", () => {
         "/workspace-templates/{workspaceTemplateId}/environment/{variableId}/delete": {},
         "/workspace-templates/{workspaceTemplateId}/secrets/{secretId}/delete": {},
         "/workspace-templates/{workspaceTemplateId}/delete": {},
+        "/workspaces/{id}/machines": { get: {}, post: {} },
+        "/workspaces/{id}/machines/{name}/release": { post: {} },
         "/workspaces/{id}/agents/{agentId}/close": {
           post: { responses: {
             "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/AgentCloseResult" } } } },
