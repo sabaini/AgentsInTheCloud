@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { AgentsInTheCloudCoreError, runCommand } from "@agents-in-the-cloud/core";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { LxdClient } from "./client.ts";
+import { LxdRequestError, LxdServerClient } from "./client.ts";
 import { certificateFingerprint, connectLxd, type LxdClientCredentials, type LxdServer } from "./tls.ts";
 
 export interface LxdTrustToken {
@@ -19,13 +19,13 @@ export interface LxdTrustToken {
 const tokenSchema = Type.Object({
   client_name: Type.String(),
   fingerprint: Type.String({ pattern: "^[0-9a-f]{64}$" }),
-  addresses: Type.Array(Type.String(), { minItems: 1 }),
+  addresses: Type.Array(Type.String()),
   secret: Type.String({ minLength: 1 }),
   expires_at: Type.String(),
 });
 
 function invalidToken(): AgentsInTheCloudCoreError {
-  return new AgentsInTheCloudCoreError("invalid_lxd_trust_token", "That doesn't look like an LXD trust token. Create one with `lxc config trust add --restricted --projects <project>`.");
+  return new AgentsInTheCloudCoreError("invalid_lxd_trust_token", "That doesn't look like an LXD trust token. Paste the whole last line that lxc config trust add printed.");
 }
 
 export function parseLxdTrustToken(input: string, now = new Date()): LxdTrustToken {
@@ -40,6 +40,7 @@ export function parseLxdTrustToken(input: string, now = new Date()): LxdTrustTok
   const expiresAt = new Date(decoded.expires_at);
   if (Number.isNaN(expiresAt.getTime())) throw invalidToken();
   if (expiresAt <= now) throw new AgentsInTheCloudCoreError("expired_lxd_trust_token", "This LXD trust token has expired. Create a new one.");
+  if (!decoded.addresses.length) throw new AgentsInTheCloudCoreError("lxd_not_listening", "This LXD server isn't listening on the network yet. Run lxc config set core.https_address :8443 on it, then create a new token.");
   return { token, clientName: decoded.client_name, fingerprint: decoded.fingerprint, addresses: decoded.addresses, expiresAt };
 }
 
@@ -60,12 +61,18 @@ export async function createLxdClientCredentials(commonName: string): Promise<Lx
   }
 }
 
+export interface LxdJoin {
+  server: LxdServer;
+  /** The one project the token's restricted certificate may use. */
+  project: string;
+}
+
 /**
  * Trust AITC's certificate on the server that issued `input`. The token lists every
  * address of that server; the first one reachable with the token's certificate
- * fingerprint is pinned and returned.
+ * fingerprint is pinned. AITC only accepts tokens restricted to a single project.
  */
-export async function joinLxdServer(input: string, credentials: LxdClientCredentials, project: string): Promise<LxdServer> {
+export async function joinLxdServer(input: string, credentials: LxdClientCredentials): Promise<LxdJoin> {
   const token = parseLxdTrustToken(input);
   const probes = await Promise.allSettled(token.addresses.map(async (address) => {
     const { socket, certificate } = await connectLxd(address, undefined, 5_000);
@@ -79,9 +86,18 @@ export async function joinLxdServer(input: string, credentials: LxdClientCredent
     throw new AgentsInTheCloudCoreError("lxd_unreachable", `Couldn't reach the LXD server that issued this token (${reasons.join("; ")})`);
   }
   const server = reached.value;
-  const client = new LxdClient({ server, credentials, project });
-  await client.addCertificate(token.token);
-  const { auth } = await client.server();
-  if (auth !== "trusted") throw new AgentsInTheCloudCoreError("lxd_trust_failed", `LXD accepted the token but still reports AITC as ${auth}`);
-  return server;
+  const lxd = new LxdServerClient({ server, credentials });
+  try {
+    await lxd.addCertificate(token.token);
+  } catch (error) {
+    // LXD answers every unusable token the same way; tokens work once.
+    if (error instanceof LxdRequestError && error.status === 403) throw new AgentsInTheCloudCoreError("lxd_token_rejected", "LXD didn't accept this token. Each token works only once, so create a new one.");
+    throw error;
+  }
+  const { restricted, projects } = await lxd.ownCertificate();
+  if (!restricted || projects.length !== 1) {
+    await lxd.removeOwnCertificate();
+    throw new AgentsInTheCloudCoreError("lxd_token_not_restricted", "This token isn't limited to a single project. Create one with --restricted --projects <project>, so AgentsInTheCloud can only use that project.");
+  }
+  return { server, project: projects[0]! };
 }

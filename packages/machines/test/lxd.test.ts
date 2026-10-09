@@ -13,6 +13,7 @@ interface Upgrade { session: ExecSession; fd: Fd }
 
 const trustSecret = "fake-secret";
 let issuedToken = "";
+let restriction = { restricted: true, projects: ["aitc"] };
 let directory: string;
 let serverCertificate: string;
 let credentials: LxdClientCredentials;
@@ -59,6 +60,12 @@ beforeAll(async () => {
         if (body.type !== "client" || body.trust_token !== issuedToken) return failure(403, "Forbidden");
         trusted = true;
         return sync(null);
+      }
+      if (path === `/1.0/certificates/${certificateFingerprint(credentials.certificate)}`) {
+        if (!trusted) return failure(403, "Forbidden");
+        if (request.method === "GET") return sync(restriction);
+        trusted = false;
+        return sync({});
       }
       if (path === "/1.0/instances" && request.method === "POST") {
         const body = await request.json();
@@ -116,21 +123,36 @@ test("trust tokens are decoded and checked before contacting LXD", () => {
   const fingerprint = "a".repeat(64);
   expect(parseLxdTrustToken(`  ${token(fingerprint, ["10.0.0.2:8443"])}\n`)).toMatchObject({ fingerprint, addresses: ["10.0.0.2:8443"], clientName: "aitc" });
   expect(() => parseLxdTrustToken("not a token")).toThrow("doesn't look like an LXD trust token");
-  expect(() => parseLxdTrustToken(token(fingerprint, []))).toThrow("doesn't look like an LXD trust token");
+  expect(() => parseLxdTrustToken(token(fingerprint, []))).toThrow("isn't listening on the network");
   expect(() => parseLxdTrustToken(token(fingerprint, ["10.0.0.2:8443"], new Date(Date.now() - 1000)))).toThrow("expired");
 });
 
-test("joining pins the first address that presents the token's certificate", async () => {
+test("joining pins the first address that presents the token's certificate and learns its project", async () => {
   trusted = false;
+  restriction = { restricted: true, projects: ["aitc"] };
   issuedToken = token(certificateFingerprint(serverCertificate), ["127.0.0.1:1", fakeAddress()]);
-  const server = await joinLxdServer(issuedToken, credentials, "aitc");
-  expect(server).toEqual(fakeServer());
+  expect(await joinLxdServer(issuedToken, credentials)).toEqual({ server: fakeServer(), project: "aitc" });
   expect(trusted).toBe(true);
+});
+
+test("joining refuses tokens that aren't restricted to one project and untrusts itself again", async () => {
+  for (const unsafe of [{ restricted: false, projects: [] }, { restricted: true, projects: ["aitc", "default"] }]) {
+    trusted = false;
+    restriction = unsafe;
+    issuedToken = token(certificateFingerprint(serverCertificate), [fakeAddress()]);
+    await expect(joinLxdServer(issuedToken, credentials)).rejects.toThrow("--restricted --projects <project>");
+    expect(trusted).toBe(false);
+  }
+});
+
+test("joining explains rejected tokens", async () => {
+  issuedToken = "";
+  await expect(joinLxdServer(token(certificateFingerprint(serverCertificate), [fakeAddress()]), credentials)).rejects.toThrow("Each token works only once");
 });
 
 test("joining refuses a server whose certificate the token doesn't name", async () => {
   const other = await selfSignedServerCertificate("other-lxd");
-  await expect(joinLxdServer(token(certificateFingerprint(other.certificate), [fakeAddress()]), credentials, "aitc")).rejects.toThrow("different certificate");
+  await expect(joinLxdServer(token(certificateFingerprint(other.certificate), [fakeAddress()]), credentials)).rejects.toThrow("different certificate");
 });
 
 test("failed operations surface LXD's own error", async () => {

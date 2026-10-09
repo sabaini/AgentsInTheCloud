@@ -1,0 +1,14 @@
+.settings-sec-machines .managed-list { margin-top: 12px; }
+.settings-sec-machines .managed-list__item:has(.machines-connect) { align-items: flex-start; padding: 12px; }
+.machines-provider-icon { display: inline-flex; color: var(--text); }
+.machines-connect { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.machines-connect p { margin: 0; }
+/* Copyable shell commands read better scrolled than wrapped mid-argument. */
+.machines-connect .settings-command { overflow-x: auto; white-space: pre; }
+.machines-connect__controls { display: flex; align-items: center; gap: 8px; }
+.machines-connect__controls .text-field { min-width: 0; flex: 1; }
+
+@media (max-width: 700px) {
+  .machines-connect__controls { align-items: stretch; flex-direction: column; }
+  .machines-connect__controls .button { width: 100%; }
+}

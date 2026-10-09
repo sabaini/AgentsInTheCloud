@@ -33,6 +33,7 @@
     "@agents-in-the-cloud/desktop": "workspace:*",
     "@agents-in-the-cloud/llm": "workspace:*",
     "@agents-in-the-cloud/host": "workspace:*",
+    "@agents-in-the-cloud/machines": "workspace:*",
     "@agents-in-the-cloud/prompt": "workspace:*",
     "@agents-in-the-cloud/codex-cli-agent": "workspace:*",
     "@agents-in-the-cloud/claude-agent": "workspace:*",
