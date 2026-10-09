@@ -18,7 +18,7 @@ function describeMachine(machine: MachineView): string {
     case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${snapshots}`;
     case "creating": return `${machine.name} is being created: ${what}. Wait for it with wait_for_machine.`;
     case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.`;
-    case "stopped": return `${machine.name} is stopped: ${what}.${snapshots}`;
+    case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
     case "failed": return `${machine.name} couldn't be set up: ${machine.error}. Release it with release_machine.`;
     case "missing": return `${machine.name} is gone from the LXD server. Release it with release_machine.`;
   }
@@ -58,9 +58,10 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("list_machines", (workspaceId) => defineWorkspaceTool({
       name: "list_machines",
       label: "List Machines",
-      description: "List this workspace's test machines with their state and expiry, and the machine profiles new ones can be created from.",
+      description: "List this workspace's test machines with their state and expiry, and the machine profiles new ones can be created from. Machines stopped while the workspace was parked start again.",
       parameters: Type.Object({}),
       execute: async () => {
+        await leases.wake(workspaceId);
         const [machines, settings] = await Promise.all([leases.list(workspaceId), leases.settings(workspaceId)]);
         const text = `${machines.length ? machines.map(describeMachine).join("\n") : "This workspace has no machines."}\n\n${describeProfiles(settings)}`;
         return result(text, { machines });
@@ -69,9 +70,10 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("wait_for_machine", (workspaceId) => defineWorkspaceTool({
       name: "wait_for_machine",
       label: "Wait for Machine",
-      description: "Wait for a machine that's still being created or booting, then report its state.",
+      description: "Wait for a machine that's being created or booting, starting it first if it's stopped, then report its state.",
       parameters: Type.Object({ name: machineName }),
       execute: async (_toolCallId, params: { name: string }, signal) => {
+        await leases.wake(workspaceId, [params.name]);
         const machine = await leases.waitFor(workspaceId, params.name, waitMs, signal);
         return result(describeMachine(machine), machine);
       },

@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/server/index.ts",
     "./server": "./src/server/index.ts",
+    "./server/workspace-terminals": "./src/server/workspace-terminals.ts",
     "./client": "./src/client/index.ts"
   },
   "dependencies": {

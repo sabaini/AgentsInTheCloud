@@ -97,6 +97,9 @@ test("failures are kept on the machine, and releasing it cleans up what was made
   expect(await leases.list("w1")).toEqual([]);
 
   lxd.failCreate = undefined;
+  lxd.profiles.delete("ceph-node");
+  expect((await leases.acquire("w1", { profile: "node", name: "unprofiled" }, 5_000)).error).toBe("The LXD server has no profile called ceph-node. Create it there, or change the machine profile in the template's settings.");
+  await leases.release("w1", "unprofiled");
   lxd.hostKeys = new Map();
   expect((await leases.acquire("w1", { profile: "client" }, 5_000)).error).toContain("needs openssh-server");
   lxd.probesUntilBooted = Number.POSITIVE_INFINITY;
@@ -137,4 +140,43 @@ test("snapshots restore a machine and wait for it to come back", async () => {
   expect(await leases.restore("w1", "node-1", "clean", 5_000)).toMatchObject({ state: "ready", snapshots: ["clean"] });
   expect(instance.status).toBe("Running");
   await expect(leases.restore("w1", "node-1", "missing", 5_000)).rejects.toThrow("Snapshot not found");
+});
+
+test("parking stops ready machines, and their next use starts them again", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  lxd.probesUntilBooted = Number.POSITIVE_INFINITY;
+  await leases.acquire("w1", { profile: "client", name: "booting" }, 10);
+  await leases.stopAll("w1");
+  expect((await leases.list("w1")).map((machine) => [machine.name, machine.state])).toEqual([["node-1", "stopped"], ["booting", "starting"]]);
+
+  const node = lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!;
+  node.probesUntilBooted = 2;
+  await leases.usable("w1", "node-1", 5_000);
+  expect(node.status).toBe("Running");
+  expect((await leases.list("w1"))[0]!.state).toBe("ready");
+
+  node.status = "Stopped";
+  node.probesUntilBooted = Number.POSITIVE_INFINITY;
+  await leases.wake("w1");
+  expect((await leases.list("w1"))[0]!.state).toBe("starting");
+  await leases.release("w1", "node-1");
+  await leases.release("w1", "booting");
+});
+
+test("expired machines are released, and deleting a workspace releases all of them", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  const clientLifetimeEnds = Date.now() + client.lifetimeHours * 3_600_000;
+  expect(await leases.expire("w1", clientLifetimeEnds - 60_000)).toEqual([]);
+  expect(await leases.expire("w1", clientLifetimeEnds + 60_000)).toEqual(["node-1", "client-1"]);
+  expect(lxd.instancesByName.size).toBe(0);
+  expect(lxd.volumes.size).toBe(0);
+
+  await leases.acquire("w2", { profile: "node" }, 5_000);
+  await leases.acquire("w2", { profile: "client" }, 5_000);
+  await leases.releaseAll("w2");
+  expect(await leases.stored("w2")).toEqual([]);
+  expect(lxd.instancesByName.size).toBe(0);
 });

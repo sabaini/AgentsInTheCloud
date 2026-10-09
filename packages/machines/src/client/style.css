@@ -7,6 +7,17 @@
 .machines-connect .settings-command { overflow-x: auto; white-space: pre; }
 .machines-connect__controls { display: flex; align-items: center; gap: 8px; }
 .machines-connect__controls .text-field { min-width: 0; flex: 1; }
+.machines-untracked, .workspace-deletion-machines { display: grid; gap: 8px; }
+.machines-untracked { margin-top: 16px; }
+.machines-untracked p, .workspace-deletion-machines p { margin: 0; }
+.machines-view { box-sizing: border-box; height: 100%; overflow: auto; display: grid; align-content: start; gap: 12px; padding: 16px; }
+.machines-view p { margin: 0; }
+.machines-view__error { color: var(--danger); }
+/* Errors need reading in full, and on a phone the actions move under the machine's details. */
+.machines-view__status { white-space: normal; }
+.machines-view .managed-list__item { flex-wrap: wrap; padding-block: 8px; }
+.machines-view .managed-list__content { flex: 1 1 16rem; }
+.machines-view .managed-list__actions { margin-inline-start: auto; }
 
 @media (max-width: 700px) {
   .machines-connect__controls { align-items: stretch; flex-direction: column; }

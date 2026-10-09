@@ -48,6 +48,7 @@ import { renderWorkspaceLaunchPrompt, renderWorkspaceProvisioning } from "@agent
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { createAgentPaneHost } from "./agent-pane-host.ts";
+import { combineDeletionReviews } from "./deletion-reviews.ts";
 import { welcomeBrandHtml } from "./brand/welcome-brand.ts";
 import { agentContentId, selectAgentTurboStream } from "./agent-pane.ts";
 import { getAgentType, defaultAgentType, orderedAgentTypes, registeredAgentTypes, rememberAgentType } from "./agent-types.ts";
@@ -116,8 +117,8 @@ export function createWebApp(deps: WebAppDeps): WebApp {
   // SAFETY: This value is validated or constructed by the server boundary immediately surrounding this use.
   const workViewAdapters = workspaceModules.flatMap((module) => module.workViews ?? []) as WorkspaceModuleWorkViewAdapter[];
   const moduleDeletionReviews = workspaceModules.flatMap((module) => module.deletionReview ? [module.deletionReview] : []);
-  if (!deps.deletionReview && moduleDeletionReviews.length !== 1) throw new Error(`Expected one deletion safety contribution, found ${moduleDeletionReviews.length}`);
-  const deletionReview = deps.deletionReview ?? moduleDeletionReviews[0]!;
+  if (!deps.deletionReview && !moduleDeletionReviews.length) throw new Error("Expected a deletion safety contribution");
+  const deletionReview = deps.deletionReview ?? combineDeletionReviews(moduleDeletionReviews);
   const deletion = createWorkspaceDeletion({
     registry,
     inspect: (id) => deletionReview.inspect(id),

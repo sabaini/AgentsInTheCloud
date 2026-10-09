@@ -3,12 +3,14 @@ import { buttonHtml } from "@agents-in-the-cloud/design-system/button";
 import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/destructive-confirmation";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type SettingsContribution } from "@agents-in-the-cloud/shared";
-import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdServerClient, type LxdConnection } from "../lxd/index.ts";
+import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
 import { forgetLxdConnection, readLxdConnection, saveLxdConnection } from "./connection.ts";
+import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
 
 const sectionId = "settings-sec-machines";
 const connectPath = "/settings/machines/connect";
 const disconnectPath = "/settings/machines/disconnect";
+const deleteUntrackedPath = "/settings/machines/untracked/delete";
 const suggestedProject = "agents-in-the-cloud";
 const statusTimeoutMs = 5_000;
 
@@ -43,6 +45,26 @@ lxc config trust add --name ${suggestedProject} \\
   </form>`);
 }
 
+function renderUntracked(machines: LxdInstance[]): string {
+  if (!machines.length) return "";
+  const rows = machines.map((machine, index) => {
+    const workspace = machine.config["user.aitc.workspace"];
+    const lease = machine.config["user.aitc.lease"];
+    const remove = `<form method="post" action="${deleteUntrackedPath}" data-turbo="true"><input type="hidden" name="name" value="${escapeHtml(machine.name)}">${destructiveConfirmationHtml({
+      id: `delete_untracked_machine_${index}`,
+      trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Delete" } },
+      confirmCaption: `Delete ${machine.name}`,
+      cancelCaption: "Cancel",
+    })}</form>`;
+    return `<div class="managed-list__item">
+      <span class="managed-list__visual" aria-hidden="true">${Icons.Server}</span>
+      <div class="managed-list__content"><div class="managed-list__label"><span class="managed-list__label-text">${escapeHtml(machine.name)}</span></div><div class="managed-list__description">${escapeHtml(`${lease ?? "A machine"} from workspace ${workspace} · ${machine.status.toLowerCase()}`)}</div></div>
+      <div class="managed-list__actions">${remove}</div>
+    </div>`;
+  }).join("");
+  return `<div class="machines-untracked"><p>These machines don’t belong to a workspace anymore. Delete them, with their disks and snapshots, when you no longer need them.</p><div class="managed-list">${rows}</div></div>`;
+}
+
 async function renderConnection(connection: LxdConnection): Promise<string> {
   const disconnect = `<form method="post" action="${disconnectPath}" data-turbo="true">${destructiveConfirmationHtml({
     id: "disconnect_lxd",
@@ -56,10 +78,10 @@ async function renderConnection(connection: LxdConnection): Promise<string> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${statusTimeoutMs / 1000} seconds`)), statusTimeoutMs); });
   try {
-    const [server, config] = await Promise.race([Promise.all([lxd.server(), lxd.projectConfig(connection.project)]), deadline]);
+    const [server, config, untracked] = await Promise.race([Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]), deadline]);
     const limits = limitLabels.flatMap(([key, label]) => config[key] ? [label(config[key])] : []);
     return row(`LXD on ${server.name}`, `<div class="managed-list__description">${escapeHtml(`${where} · LXD ${server.version}`)}</div>
-      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>`, disconnect);
+      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>`, disconnect) + renderUntracked(untracked);
   } catch (error) {
     return row("LXD", `<div class="managed-list__description">${escapeHtml(where)}</div>
       <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can't reach it right now: ${errorMessage(error)}`)}</div>`, disconnect);
@@ -88,6 +110,12 @@ async function connect(request: Request): Promise<string> {
   }
 }
 
+async function deleteUntracked(request: Request): Promise<string> {
+  const connection = await readLxdConnection();
+  if (connection) await deleteUntrackedMachine(new LxdClient(connection), String((await request.formData()).get("name") ?? ""));
+  return await renderMachinesSettings();
+}
+
 async function disconnect(): Promise<string> {
   const connection = await readLxdConnection();
   if (!connection) return await renderMachinesSettings();
@@ -110,6 +138,7 @@ export const machinesSettingsContribution: SettingsContribution = {
     if (request.method !== "POST") return undefined;
     if (url.pathname === connectPath) return turboStreamResponse(turboStream("replace", sectionId, await connect(request)));
     if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await disconnect()));
+    if (url.pathname === deleteUntrackedPath) return turboStreamResponse(turboStream("replace", sectionId, await deleteUntracked(request)));
     return undefined;
   },
 };

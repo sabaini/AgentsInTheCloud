@@ -168,6 +168,20 @@ curl -sS -X POST "http://localhost:3000/workspaces/$id/commands/agent.create" \
 
 Navigate an existing Browser view with `POST /workspaces/:id/browser/:browserId/navigate` and `{ "url": "..." }`.
 
+Stage test machines for a Workspace whose template has machine profiles, and an LXD server connected in Settings. Creating one waits until it has booted, up to 10 minutes; inside the Workspace, `ssh <name>` then reaches it. `machines.open` opens the Machines Work view.
+
+```sh
+curl -sS -X POST "http://localhost:3000/workspaces/$id/machines" \
+  -H 'Origin: http://localhost:3000' \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d '{"profile":"node"}'
+
+curl -sS "http://localhost:3000/workspaces/$id/machines" -H 'Accept: application/json'
+
+curl -sS -X POST "http://localhost:3000/workspaces/$id/machines/node-1/release" \
+  -H 'Origin: http://localhost:3000' -H 'Accept: application/json'
+```
+
 ## Arrange Work views
 
 Changes uses **Diff endpoints**: a `base` and `target`, with an optional implicit base for a single chosen commit. Existing comparison HTTP fields remain `start` (base) and `end` (target); their behavior is unchanged.
