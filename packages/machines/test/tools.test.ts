@@ -18,6 +18,7 @@ beforeAll(async () => {
     lxd: async () => lxd,
     machineSettings: async () => settings,
     publicKey: async () => "ssh-ed25519 AAAAworkspace",
+    reachesMachines: async () => true,
     directory: (workspaceId) => join(directory, workspaceId),
     bootTimeoutMs: 5_000,
     pollMs: 1,

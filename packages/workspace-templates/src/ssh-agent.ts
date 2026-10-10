@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
-import { agentsInTheCloudDataPath, dockerHostAgentsInTheCloudDataPath, getAgentsInTheCloudRuntimeContext, type AgentsInTheCloudEventBus } from "@agents-in-the-cloud/core";
+import { agentsInTheCloudDataPath, dockerHostAgentsInTheCloudDataPath, getAgentsInTheCloudRuntimeContext, readTextIfExists, type AgentsInTheCloudEventBus } from "@agents-in-the-cloud/core";
 import { listWorkspaces } from "@agents-in-the-cloud/workspace";
 import { workspaceTemplateIdOfInit } from "./workspace-template.ts";
 import { revealEffectiveSshKeys } from "./ssh-keys.ts";
@@ -9,6 +9,7 @@ import { SharedSshAgent } from "./shared-ssh-agent.ts";
 
 /** Where a workspace's SSH directory appears inside its container, read-only and live. */
 export const workspaceSshContainerDirectory = "/run/agents-in-the-cloud-ssh-agent";
+const configDirectoryInclude = `Include ${workspaceSshContainerDirectory}/ssh_config.d/*.conf\n`;
 let shared: SharedSshAgent | undefined;
 const workspaceKeySources = new Set<(workspaceId: string) => Promise<string[]>>();
 
@@ -27,6 +28,11 @@ async function signingKeys(workspaceTemplateId?: string, workspaceId?: string): 
 /** The host side of a workspace's SSH directory. Modules may add `ssh_config.d/*.conf` files; the workspace's SSH config includes them. */
 export function workspaceSshDirectory(workspaceId: string): string {
   return agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId);
+}
+
+/** Whether ssh in the workspace reads `ssh_config.d`. A container gets its SSH config once, so ones made before it did never will. */
+export async function workspaceSshReadsConfigDirectory(workspaceId: string): Promise<boolean> {
+  return (await readTextIfExists(join(workspaceSshDirectory(workspaceId), "ssh_config")))?.startsWith(configDirectoryInclude) ?? false;
 }
 
 function sshEnvironment(directory: string) {
@@ -75,7 +81,7 @@ printf '%s\\n' "$keys" | curl --noproxy '*' --fail --silent --show-error --max-t
     await writeFile(join(directory, "known-hosts-command"), command, { mode: 0o755 });
     // Loopback is the workspace's own container, not a server the user can verify, so keep default OpenSSH behavior there.
     // Included hosts come first, because OpenSSH keeps the first value it finds for each option.
-    await writeFile(join(directory, "ssh_config"), `Include ${workspaceSshContainerDirectory}/ssh_config.d/*.conf\nHost * !localhost !127.* !::1\n    KnownHostsCommand /run/agents-in-the-cloud-ssh-agent/known-hosts-command %h %p\n    UserKnownHostsFile /run/agents-in-the-cloud-ssh-agent/known_hosts /run/agents-in-the-cloud-ssh-agent/workspace_known_hosts ~/.ssh/known_hosts\n    StrictHostKeyChecking yes\n`);
+    await writeFile(join(directory, "ssh_config"), `${configDirectoryInclude}Host * !localhost !127.* !::1\n    KnownHostsCommand /run/agents-in-the-cloud-ssh-agent/known-hosts-command %h %p\n    UserKnownHostsFile /run/agents-in-the-cloud-ssh-agent/known_hosts /run/agents-in-the-cloud-ssh-agent/workspace_known_hosts ~/.ssh/known_hosts\n    StrictHostKeyChecking yes\n`);
     plan.containerFiles.push({ source: join(directory, "ssh_config"), target: "/etc/ssh/ssh_config.d/agents-in-the-cloud.conf" });
     plan.initScripts.push("chown root:root /etc/ssh/ssh_config.d/agents-in-the-cloud.conf; chmod 644 /etc/ssh/ssh_config.d/agents-in-the-cloud.conf");
     plan.mounts.push({ type: "bind", source: dockerHostAgentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "ssh-agents", workspaceId), target: workspaceSshContainerDirectory, readonly: true });
