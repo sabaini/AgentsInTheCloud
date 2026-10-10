@@ -401,70 +401,109 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     return await view(workspaceId, name);
   }
 
-  async function snapshot(workspaceId: string, name: string, snapshotName: string): Promise<MachineView> {
-    if (!snapshotNamePattern.test(snapshotName)) throw new AgentsInTheCloudCoreError("invalid_arguments", "Snapshot names use letters, digits, dots, hyphens and underscores");
-    await serialize(workspaceId, async () => {
-      const lease = await find(workspaceId, name);
-      if (lease.status !== "ready") throw refused(`${name} isn't ready yet, so it can't be snapshotted`);
-      const lxd = await lxdFor(lease);
-      const running = (await lxd.instance(lease.instance)).status === "Running";
-      if (running) {
-        // A snapshot holds what's on the machine's disks, so what it has only written to memory so far goes there first.
-        const flushed = await lxd.run(lease.instance, ["sync"]);
-        if (flushed.exitCode !== 0) throw refused(`Couldn't save what ${name} has written before the snapshot: ${flushed.stderr.trim()}`);
-      }
-      // Paused, its disks are saved as they were at one moment.
-      const pause = running && lease.volumes.length > 0;
-      if (pause) await lxd.setInstanceState(lease.instance, "freeze");
-      try {
-        if (pause) await deps.changed(workspaceId, await readLeases(workspaceId));
-        // Its extra disks aren't part of its own snapshot. That comes last, so a listed snapshot has every disk.
-        for (const volume of lease.volumes) await lxd.createVolumeSnapshot(lease.pool!, volume, snapshotName);
-        await lxd.createSnapshot(lease.instance, snapshotName);
-      } finally {
-        if (pause) {
-          await lxd.setInstanceState(lease.instance, "unfreeze");
-          await deps.changed(workspaceId, await readLeases(workspaceId));
-        }
-      }
-    });
-    return await view(workspaceId, name);
+  async function views(workspaceId: string, names: string[]): Promise<MachineView[]> {
+    const machines = await list(workspaceId);
+    return names.map((name) => machines.find((machine) => machine.name === name)!);
   }
 
-  async function restore(workspaceId: string, name: string, snapshotName: string, waitMs: number, signal?: AbortSignal): Promise<MachineView> {
-    const key = taskKey(workspaceId, name);
-    const lxd = await serialize(workspaceId, async () => {
-      const leases = await readLeases(workspaceId);
+  /** The named machines' leases, each named once, in the order given. */
+  function named(leases: MachineLease[], names: string[]): MachineLease[] {
+    if (!names.length) throw new AgentsInTheCloudCoreError("invalid_arguments", "Name at least one machine");
+    if (new Set(names).size !== names.length) throw new AgentsInTheCloudCoreError("invalid_arguments", "Name each machine once");
+    return names.map((name) => {
       const lease = leases.find((candidate) => candidate.name === name);
       if (!lease) throw refused(`This workspace has no machine called ${name}`);
-      // One whose last restore didn't finish can be restored again.
-      if (lease.status !== "ready" && lease.status !== "restoring") throw refused(`${name} isn't ready yet, so it can't be restored`);
-      const lxd = await lxdFor(lease);
-      if (!(await lxd.snapshots(lease.instance)).includes(snapshotName)) throw refused(`${name} has no snapshot called ${snapshotName}`);
-      // Until every disk is back, they're from different points in time, so nothing may start the machine meanwhile.
-      lease.status = "restoring";
-      delete lease.error;
-      restoring.add(key);
+      return lease;
+    });
+  }
+
+  /**
+   * Saves each machine's disks as a snapshot. Several machines are paused together while it's taken, so it holds one
+   * moment across all of them, which machines working together need to come back to.
+   */
+  async function snapshot(workspaceId: string, names: string[], snapshotName: string): Promise<MachineView[]> {
+    if (!snapshotNamePattern.test(snapshotName)) throw new AgentsInTheCloudCoreError("invalid_arguments", "Snapshot names use letters, digits, dots, hyphens and underscores");
+    await serialize(workspaceId, async () => {
+      const machines = named(await readLeases(workspaceId), names);
+      for (const lease of machines) {
+        if (lease.status !== "ready") throw refused(`${lease.name} isn't ready yet, so it can't be snapshotted`);
+        if ((await (await lxdFor(lease)).snapshots(lease.instance)).includes(snapshotName)) throw refused(`${lease.name} already has a snapshot called ${snapshotName}`);
+      }
+      const lxd = await connected();
+      const running: MachineLease[] = [];
+      for (const lease of machines) if ((await lxd.instance(lease.instance)).status === "Running") running.push(lease);
+      // A snapshot holds what's on the machines' disks, so what they've only written to memory so far goes there first.
+      await Promise.all(running.map(async (lease) => {
+        const flushed = await lxd.run(lease.instance, ["sync"]);
+        if (flushed.exitCode !== 0) throw refused(`Couldn't save what ${lease.name} has written before the snapshot: ${flushed.stderr.trim()}`);
+      }));
+      // Paused, disks are saved as they were at one moment: a machine's extra disks, which have snapshots of their own, and several machines' disks.
+      const pausing = machines.length > 1 ? running : running.filter((lease) => lease.volumes.length > 0);
+      const freezes = await Promise.allSettled(pausing.map((lease) => lxd.setInstanceState(lease.instance, "freeze")));
+      const frozen = pausing.filter((_, index) => freezes[index]!.status === "fulfilled");
+      try {
+        const refusedFreeze = freezes.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (refusedFreeze) throw refusedFreeze.reason;
+        if (frozen.length) await deps.changed(workspaceId, await readLeases(workspaceId));
+        for (const lease of machines) {
+          // A machine's extra disks aren't part of its own snapshot. That comes last, so a listed snapshot has every disk.
+          for (const volume of lease.volumes) await lxd.createVolumeSnapshot(lease.pool!, volume, snapshotName);
+          await lxd.createSnapshot(lease.instance, snapshotName);
+        }
+      } finally {
+        const unfreezes = await Promise.allSettled(frozen.map((lease) => lxd.setInstanceState(lease.instance, "unfreeze")));
+        if (frozen.length) await deps.changed(workspaceId, await readLeases(workspaceId));
+        const refusedUnfreeze = unfreezes.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (refusedUnfreeze) throw refusedUnfreeze.reason;
+      }
+    });
+    return await views(workspaceId, names);
+  }
+
+  /**
+   * Puts the machines back to a snapshot they all have. All of them stop before any is restored, and they start again
+   * once all are, so machines working together come back from the same moment.
+   */
+  async function restore(workspaceId: string, names: string[], snapshotName: string, waitMs: number, signal?: AbortSignal): Promise<MachineView[]> {
+    const lxd = await serialize(workspaceId, async () => {
+      const leases = await readLeases(workspaceId);
+      const machines = named(leases, names);
+      for (const lease of machines) {
+        // One whose last restore didn't finish can be restored again.
+        if (lease.status !== "ready" && lease.status !== "restoring") throw refused(`${lease.name} isn't ready yet, so it can't be restored`);
+        if (!(await (await lxdFor(lease)).snapshots(lease.instance)).includes(snapshotName)) throw refused(`${lease.name} has no snapshot called ${snapshotName}`);
+      }
+      const lxd = await connected();
+      // Until every disk is back, they're from different points in time, so nothing may start the machines meanwhile.
+      for (const lease of machines) {
+        lease.status = "restoring";
+        delete lease.error;
+        restoring.add(taskKey(workspaceId, lease.name));
+      }
       try {
         await writeLeases(workspaceId, leases);
-        // Its disks can't be restored while it runs, and what it's running is about to be discarded.
-        if ((await lxd.instance(lease.instance)).status !== "Stopped") await lxd.setInstanceState(lease.instance, "stop", true);
-        for (const volume of lease.volumes) await lxd.restoreVolumeSnapshot(lease.pool!, volume, snapshotName);
-        await lxd.restoreSnapshot(lease.instance, snapshotName);
-        await lxd.setInstanceState(lease.instance, "start");
-        lease.status = "starting";
+        // Their disks can't be restored while they run, and what they're running is about to be discarded.
+        await Promise.all(machines.map(async (lease) => {
+          if ((await lxd.instance(lease.instance)).status !== "Stopped") await lxd.setInstanceState(lease.instance, "stop", true);
+        }));
+        for (const lease of machines) {
+          for (const volume of lease.volumes) await lxd.restoreVolumeSnapshot(lease.pool!, volume, snapshotName);
+          await lxd.restoreSnapshot(lease.instance, snapshotName);
+        }
+        await Promise.all(machines.map((lease) => lxd.setInstanceState(lease.instance, "start")));
+        for (const lease of machines) lease.status = "starting";
       } catch (error) {
-        lease.error = errorMessage(error);
+        for (const lease of machines) lease.error = errorMessage(error);
         throw error;
       } finally {
-        restoring.delete(key);
+        for (const lease of machines) restoring.delete(taskKey(workspaceId, lease.name));
         await writeLeases(workspaceId, leases);
       }
       return lxd;
     });
-    const task = start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal)));
-    await within(task.done, waitMs, signal);
-    return await view(workspaceId, name);
+    const booting = names.map((name) => start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal))));
+    await within(Promise.all(booting.map((task) => task.done)).then(() => undefined), waitMs, signal);
+    return await views(workspaceId, names);
   }
 
   /**

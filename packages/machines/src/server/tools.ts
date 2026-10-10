@@ -22,7 +22,7 @@ function describeMachine(machine: MachineView): string {
     case "paused": return `${machine.name} is paused while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
     case "restoring": return `${machine.name} is being restored to a snapshot: ${what}.${snapshots}`;
-    case "interrupted": return `${machine.name} didn't finish restoring to a snapshot (${machine.error}), so its disks may be from different points in time: ${what}. It stays stopped until restore_machine succeeds, or release it with release_machine.${snapshots}`;
+    case "interrupted": return `${machine.name} didn't finish restoring to a snapshot (${machine.error}), so its disks may be from different points in time: ${what}. It stays stopped until restore_machines succeeds, or release it with release_machine.${snapshots}`;
     case "failed": return `${machine.name} couldn't be set up: ${machine.error}. Release it with release_machine.`;
     case "missing": return `${machine.name} is gone from the LXD server. Release it with release_machine.`;
     case "disconnected": return `${machine.name} is on an LXD server that isn't connected now: ${what}. It can be used or released once the user connects that server again in Settings, under Machines.`;
@@ -37,11 +37,17 @@ function describeProfiles({ profiles, maxMachines }: MachineSettings): string {
 
 type ToolDetails = MachineView | { machines: MachineView[] } | { name: string };
 
+/** "node-1", "node-1 and node-2", "node-1, node-2 and node-3". */
+function listed(names: string[]): string {
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0]!;
+}
+
 function result(text: string, details: ToolDetails) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
 const machineName = Type.String({ description: "The machine's name, as acquire_machine or list_machines reported it." });
+const machineNames = Type.Array(Type.String(), { minItems: 1, description: "The machines' names, as acquire_machine or list_machines reported them." });
 const snapshotName = Type.String({ description: "Snapshot name: letters, digits, dots, hyphens and underscores." });
 
 /** Gives every workspace's Agents the machine tools; returns a function that takes them away again. */
@@ -93,24 +99,24 @@ export function registerMachineTools(leases: MachineLeases): () => void {
         return result(`Released ${params.name}. It's deleted, with its disks and snapshots.`, { name: params.name });
       },
     })),
-    registerWorkspaceAgentTool("snapshot_machine", (workspaceId) => defineWorkspaceTool({
-      name: "snapshot_machine",
-      label: "Snapshot Machine",
-      description: "Save a machine's disks, its extra ones included, as a named snapshot, to return to with restore_machine between experiments. A machine with extra disks pauses while they're saved. Snapshots last until the machine is released.",
-      parameters: Type.Object({ name: machineName, snapshot: snapshotName }),
-      execute: async (_toolCallId, params: { name: string; snapshot: string }) => {
-        const machine = await leases.snapshot(workspaceId, params.name, params.snapshot);
-        return result(`Saved snapshot ${params.snapshot} of ${params.name}.`, machine);
+    registerWorkspaceAgentTool("snapshot_machines", (workspaceId) => defineWorkspaceTool({
+      name: "snapshot_machines",
+      label: "Snapshot Machines",
+      description: "Save one or more machines' disks, extra disks included, as a named snapshot of each, to return to with restore_machines between experiments. Snapshot machines that work together, like a cluster's nodes, in one call: they're paused together, so the snapshot holds one moment across all of them. A single machine with extra disks pauses too. Snapshots last until the machine is released.",
+      parameters: Type.Object({ machines: machineNames, snapshot: snapshotName }),
+      execute: async (_toolCallId, params: { machines: string[]; snapshot: string }) => {
+        const machines = await leases.snapshot(workspaceId, params.machines, params.snapshot);
+        return result(`Saved snapshot ${params.snapshot} of ${listed(params.machines)}.`, { machines });
       },
     })),
-    registerWorkspaceAgentTool("restore_machine", (workspaceId) => defineWorkspaceTool({
-      name: "restore_machine",
-      label: "Restore Machine",
-      description: "Put a machine back to one of its snapshots, discarding every change since. The machine restarts; this waits until it's back.",
-      parameters: Type.Object({ name: machineName, snapshot: snapshotName }),
-      execute: async (_toolCallId, params: { name: string; snapshot: string }, signal) => {
-        const machine = await leases.restore(workspaceId, params.name, params.snapshot, waitMs, signal);
-        return result(`Restored ${params.name} to ${params.snapshot}. ${describeMachine(machine)}`, machine);
+    registerWorkspaceAgentTool("restore_machines", (workspaceId) => defineWorkspaceTool({
+      name: "restore_machines",
+      label: "Restore Machines",
+      description: "Put one or more machines back to a snapshot they all have, discarding every change since. Restore machines that work together, like a cluster's nodes, in one call: all of them stop before any is restored and start again together, so they come back from the same moment. One at a time, the others would carry on without it. This waits until they're back.",
+      parameters: Type.Object({ machines: machineNames, snapshot: snapshotName }),
+      execute: async (_toolCallId, params: { machines: string[]; snapshot: string }, signal) => {
+        const machines = await leases.restore(workspaceId, params.machines, params.snapshot, waitMs, signal);
+        return result(`Restored ${listed(params.machines)} to ${params.snapshot}.\n${machines.map(describeMachine).join("\n")}`, { machines });
       },
     })),
   ];

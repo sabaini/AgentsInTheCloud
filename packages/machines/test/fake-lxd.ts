@@ -10,7 +10,7 @@ export class FakeLxd implements MachineLxd {
   instancesByName = new Map<string, FakeInstance>();
   volumes = new Map<string, string>();
   volumeSnapshots = new Map<string, string[]>();
-  /** Snapshots and restores, with the state of the instance they're for at the time. */
+  /** State changes, commands run, snapshots and restores, with the state of the instance they're for at the time. */
   log: string[] = [];
   profiles = new Map<string, LxdDevices>([
     ["default", { root: { type: "disk", path: "/", pool: "default" }, eth0: { type: "nic", network: "lxdbr0" } }],
@@ -59,6 +59,7 @@ export class FakeLxd implements MachineLxd {
     this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], address: `10.0.0.${this.instancesByName.size + 2}`, probesUntilBooted: this.probesUntilBooted, cloudInitReadsLeft: 0, files: new Map(this.hostKeys) });
   }
   async setInstanceState(name: string, action: "start" | "stop" | "restart" | "freeze" | "unfreeze") {
+    this.log.push(`${action} ${name}`);
     this.existing(name).status = action === "stop" ? "Stopped" : action === "freeze" ? "Frozen" : "Running";
   }
   async deleteInstance(name: string) {
