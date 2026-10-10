@@ -1,4 +1,4 @@
-import { stopWorkspaceTemplateSshAgents, workspaceSourceSshEnvironment } from "../src/ssh-agent.ts";
+import { registerWorkspaceTemplateSshAgentWorkspaceEvents, stopWorkspaceTemplateSshAgents, workspaceSourceSshEnvironment, workspaceSshDirectory, workspaceSshReadsConfigDirectory } from "../src/ssh-agent.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
@@ -105,6 +105,26 @@ describe("workspace source preparation", () => {
         expect(plan.labels["com.agents-in-the-cloud.source-template"]).toBe(source.templateKey);
       }
     }
+  });
+
+  test("ssh reads ssh_config.d only in workspaces whose SSH config was written with it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agents-in-the-cloud-ssh-config-test-"));
+    tempRoots.push(root);
+    const remote = join(root, "repo.git");
+    await run(["git", "init", "--bare", "-b", "main", remote]);
+    const workspaceTemplate = (await addWorkspaceTemplate(remote)).workspaceTemplate;
+    const events = createAgentsInTheCloudEventBus();
+    registerWorkspaceTemplateSshAgentWorkspaceEvents(events);
+    const init: GitWorkspaceTemplateInitInstruction = { type: "project.git", projectId: workspaceTemplate.id, name: workspaceTemplate.id, gitUrl: remote, branch: null, sessionShareKey: workspaceTemplate.id };
+    const plan: WorkspaceDockerPlan = { labels: {}, env: {}, mounts: [], preloadImages: [], extraArgs: [], initScripts: [], containerFiles: [], cleanup: [] };
+    await events.emit("workspace_plan_prepare", { workspaceId: "current", init, workHostPath: join(root, "work"), workContainerPath: "/work", plan });
+    expect(await workspaceSshReadsConfigDirectory("current")).toBe(true);
+
+    // A container keeps the SSH config it was made with.
+    await mkdir(workspaceSshDirectory("older"), { recursive: true });
+    await writeFile(join(workspaceSshDirectory("older"), "ssh_config"), "Host * !localhost !127.* !::1\n    StrictHostKeyChecking yes\n");
+    expect(await workspaceSshReadsConfigDirectory("older")).toBe(false);
+    expect(await workspaceSshReadsConfigDirectory("unknown")).toBe(false);
   });
 
   test("uses the first pushed commit for later workspaces while the original stays unborn", async () => {

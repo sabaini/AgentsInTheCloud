@@ -16,6 +16,7 @@ function dependencies(overrides: Partial<MachineLeaseDependencies> = {}): Machin
     lxd: async () => connected ? lxd : undefined,
     machineSettings: async () => settings,
     publicKey: async (workspaceId) => `ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace ${workspaceId}`,
+    reachesMachines: async () => true,
     directory: (workspaceId) => join(directory, workspaceId),
     bootTimeoutMs: 5_000,
     pollMs: 1,
@@ -62,6 +63,7 @@ test("requests that can't be met are refused before anything is created", async 
   const leases = createMachineLeases(dependencies());
   await expect(leases.acquire("w1", { profile: "osd" }, 5_000)).rejects.toThrow("no machine profile called osd. This workspace can use node, client");
   await expect(leases.acquire("w1", { profile: "node", name: "Node 1" }, 5_000)).rejects.toThrow("lowercase letters");
+  await expect(createMachineLeases(dependencies({ reachesMachines: async () => false })).acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("older than machines");
   connected = false;
   await expect(leases.acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("No LXD server is connected");
   connected = true;

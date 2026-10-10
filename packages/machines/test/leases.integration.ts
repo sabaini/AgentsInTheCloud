@@ -59,6 +59,7 @@ try {
     lxd: async () => lxd,
     machineSettings: async () => ({ profiles: [profile({ name: "node", diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
     publicKey: async () => (await readFile(`${keyPath}.pub`, "utf8")).trim(),
+    reachesMachines: async () => true,
     directory: () => directory,
     bootTimeoutMs: 10 * 60_000,
     pollMs: 2_000,

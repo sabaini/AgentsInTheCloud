@@ -45,6 +45,8 @@ export interface MachineLeaseDependencies<Lxd extends MachineLxd = MachineLxd> {
   lxd(): Promise<Lxd | undefined>;
   machineSettings(workspaceId: string): Promise<MachineSettings>;
   publicKey(workspaceId: string): Promise<string>;
+  /** Whether ssh in the workspace can reach its machines; workspaces made before there were machines can't. */
+  reachesMachines(workspaceId: string): Promise<boolean>;
   directory(workspaceId: string): string;
   /** How long cloud-init may take before a machine counts as failed. */
   bootTimeoutMs: number;
@@ -372,6 +374,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       // `ssh <name>` reaches the machine, so it mustn't shadow the workspace itself.
       if (name === "localhost") throw new AgentsInTheCloudCoreError("invalid_arguments", "A machine can't be called localhost");
       if (leases.some((lease) => lease.name === name)) throw refused(`This workspace already has a machine called ${name}`);
+      if (!await deps.reachesMachines(workspaceId)) throw refused("This workspace is older than machines in AgentsInTheCloud, so ssh in it can't reach them. Ask the user to create a new workspace from its template to use machines.");
       // Refuse before recording anything when no LXD server is connected.
       const { location } = await connected();
       await deps.publicKey(workspaceId);

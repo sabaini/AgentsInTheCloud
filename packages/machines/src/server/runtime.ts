@@ -1,5 +1,5 @@
 import { getWorkspaceInit } from "@agents-in-the-cloud/workspace";
-import { getWorkspaceTemplateConfiguration, isGitWorkspaceTemplateInit, workspaceSshContainerDirectory, workspaceSshDirectory, workspaceTemplateIdFromInit } from "@agents-in-the-cloud/workspace-templates";
+import { getWorkspaceTemplateConfiguration, isGitWorkspaceTemplateInit, workspaceSshContainerDirectory, workspaceSshDirectory, workspaceSshReadsConfigDirectory, workspaceTemplateIdFromInit } from "@agents-in-the-cloud/workspace-templates";
 import { LxdClient } from "../lxd/index.ts";
 import { readLxdConnection } from "./connection.ts";
 import { createMachineLeases, type MachineSettings } from "./leases.ts";
@@ -42,6 +42,8 @@ export const machineLeases = createMachineLeases({
   lxd: connectedLxd,
   machineSettings,
   publicKey: workspaceMachinePublicKey,
+  // Machines' ssh config is a file in ssh_config.d.
+  reachesMachines: workspaceSshReadsConfigDirectory,
   directory: workspaceMachinesDirectory,
   bootTimeoutMs: 15 * 60_000,
   pollMs: 3_000,
