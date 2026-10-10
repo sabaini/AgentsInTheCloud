@@ -145,12 +145,16 @@ test("snapshots restore a machine and wait for it to come back", async () => {
 });
 
 test("a snapshot has what the machine has written and its extra disks too, saved while it's paused, and restoring rolls them back with it", async () => {
-  const leases = createMachineLeases(dependencies());
-  await leases.acquire("w1", { profile: "node" }, 5_000);
   const instance = machineInstanceName("w1", "node-1");
+  let shown: string[] = [];
+  const leases = createMachineLeases(dependencies({ changed: async () => { shown.push(lxd.instancesByName.get(instance)?.status ?? "none"); } }));
+  await leases.acquire("w1", { profile: "node" }, 5_000);
   const disks = [1, 2, 3].map((n) => `${instance}-disk${n}`);
+  shown = [];
   await leases.snapshot("w1", "node-1", "clean");
   expect(lxd.log).toEqual([`run sync in ${instance} while Running`, ...disks.map((disk) => `snapshot ${disk} clean while Frozen`), `snapshot ${instance} clean while Frozen`]);
+  // The Machines view shows it paused, then running again.
+  expect(shown).toEqual(["Frozen", "Running"]);
   expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
 
   lxd.log = [];

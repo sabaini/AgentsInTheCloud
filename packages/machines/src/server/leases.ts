@@ -49,7 +49,7 @@ export interface MachineLeaseDependencies<Lxd extends MachineLxd = MachineLxd> {
   /** How long cloud-init may take before a machine counts as failed. */
   bootTimeoutMs: number;
   pollMs: number;
-  /** Runs after every change to a workspace's leases, before the change counts as made. */
+  /** Runs after every change to a workspace's leases or how its machines run, before the change counts as made. */
   changed(workspaceId: string, leases: MachineLease[]): Promise<void>;
 }
 
@@ -402,13 +402,19 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       }
       // Paused, its disks are saved as they were at one moment.
       const pause = running && lease.volumes.length > 0;
-      if (pause) await lxd.setInstanceState(lease.instance, "freeze");
+      if (pause) {
+        await lxd.setInstanceState(lease.instance, "freeze");
+        await deps.changed(workspaceId, await readLeases(workspaceId));
+      }
       try {
         // Its extra disks aren't part of its own snapshot. That comes last, so a listed snapshot has every disk.
         for (const volume of lease.volumes) await lxd.createVolumeSnapshot(lease.pool!, volume, snapshotName);
         await lxd.createSnapshot(lease.instance, snapshotName);
       } finally {
-        if (pause) await lxd.setInstanceState(lease.instance, "unfreeze");
+        if (pause) {
+          await lxd.setInstanceState(lease.instance, "unfreeze");
+          await deps.changed(workspaceId, await readLeases(workspaceId));
+        }
       }
     });
     return await view(workspaceId, name);
