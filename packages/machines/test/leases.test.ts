@@ -167,6 +167,14 @@ test("a snapshot has what the machine has written and its extra disks too, saved
   expect(lxd.volumeSnapshots.size).toBe(0);
 });
 
+test("a snapshot unfreezes the machine even when showing it paused fails", async () => {
+  const instance = machineInstanceName("w1", "node-1");
+  const leases = createMachineLeases(dependencies({ changed: async () => { if (lxd.instancesByName.get(instance)?.status === "Frozen") throw new Error("Couldn't write the workspace's ssh config"); } }));
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  await expect(leases.snapshot("w1", "node-1", "clean")).rejects.toThrow("Couldn't write the workspace's ssh config");
+  expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
+});
+
 test("parking stops ready machines, and their next use starts them again", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
