@@ -1,8 +1,7 @@
 import type { WorkspaceModule } from "@agents-in-the-cloud/shared";
-import { listWorkspaces } from "@agents-in-the-cloud/workspace";
 import { isGitWorkspaceTemplateInit, registerWorkspaceSshKeySource, workspaceTemplateIdFromInit } from "@agents-in-the-cloud/workspace-templates";
 import { machinesDeletionReview, registerMachineLifecycle } from "./lifecycle.ts";
-import { readWorkspaceMachineKey } from "./machine-key.ts";
+import { readWorkspaceMachineKey, workspacesWithMachines } from "./machine-key.ts";
 import { machineLeases, machineTunnels, onMachinesChanged } from "./runtime.ts";
 import { machinesSettingsContribution } from "./settings.ts";
 import { registerMachineTools } from "./tools.ts";
@@ -23,7 +22,7 @@ export const agentsInTheCloudServerModule: WorkspaceModule = {
     registerMachineTools(machineLeases);
     registerMachineLifecycle(context);
     // Sockets end with the AgentsInTheCloud process; machines outlive it.
-    for (const { id } of (await listWorkspaces()).workspaces) await machineTunnels.sync(id, await machineLeases.stored(id));
+    for (const workspaceId of await workspacesWithMachines()) await machineTunnels.sync(workspaceId, await machineLeases.stored(workspaceId));
   },
   attachToWorkspace: ({ workspaceId, init }) => attachMachines(workspaceId, isGitWorkspaceTemplateInit(init) ? workspaceTemplateIdFromInit(init) : undefined),
 };
