@@ -96,6 +96,32 @@ test("a connection waiting for its machine to restart doesn't hold up the lease 
   await tunnels.close("w1");
 });
 
+test("the relay keeps only the start of what the machine writes to stderr", async () => {
+  const noisy: MachineTunnelLxd = {
+    async exec() {
+      return {
+        stdout: (async function* () {})(),
+        stderr: (async function* () { for (let i = 0; i < 4096; i++) yield Buffer.alloc(1024, "e"); })(),
+        write: async () => undefined,
+        closeStdin: () => undefined,
+        exited: Promise.resolve(1),
+      };
+    },
+  };
+  const logged = spyOn(console, "error").mockImplementation(() => undefined);
+  const tunnels = createMachineTunnels({ usable: async () => noisy, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  await tunnels.sync("w1", [lease("node-1", "ready")]);
+  const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
+  const client = connect(join(directory, "machines", socket));
+  await once(client, "connect");
+  client.end();
+  await Array.fromAsync(client);
+  while (!logged.mock.calls.length) await Bun.sleep(1);
+  expect(logged).toHaveBeenCalledWith(`[machines] SSH relay to node-1-abcd1234 ended with status 1: ${"e".repeat(4096)}`);
+  logged.mockRestore();
+  await tunnels.close("w1");
+});
+
 test("losing the machine's side mid-connection ends it, so ssh doesn't wait for the rest of a reply", async () => {
   const sent = Promise.withResolvers<void>();
   const failing: MachineTunnelLxd = {

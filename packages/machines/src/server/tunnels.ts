@@ -19,6 +19,8 @@ export interface MachineTunnelDependencies {
 
 /** Inside the machine; LXD exec reaches it whether the LXD server is local or remote, without a route to its network. */
 const sshCommand = ["nc", "-N", "127.0.0.1", "22"];
+/** How much of what nc in the machine writes to stderr is kept to explain a failed connection. */
+const stderrKeptChars = 4096;
 
 /** Unix socket paths are limited to 107 bytes, and a machine name can be 40 characters on its own. */
 function socketName(name: string): string {
@@ -74,9 +76,10 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
         client.end();
       };
       const errors = async () => {
+        // The machine decides how much it writes here.
         let stderr = "";
-        for await (const chunk of process.stderr) stderr += chunk.toString("utf8");
-        return stderr.trim();
+        for await (const chunk of process.stderr) if (stderr.length < stderrKeptChars) stderr += chunk.toString("utf8");
+        return stderr.slice(0, stderrKeptChars).trim();
       };
       const [, forwarded, stderr, exited] = await Promise.allSettled([toMachine(), toClient(), errors(), process.exited]);
       if (forwarded.status === "rejected") throw forwarded.reason;
