@@ -10,6 +10,7 @@ import { invalidArguments } from "@agents-in-the-cloud/core";
 import { errorMessage, escapeHtml, providerBadgeHtml } from "@agents-in-the-cloud/shared";
 import { clearGitHubToken } from "@agents-in-the-cloud/proxy-egress";
 import { agentsInTheCloudUrl } from "@agents-in-the-cloud/proxy-ingress";
+import { disconnectLxd } from "@agents-in-the-cloud/machines/server";
 import { clearCommitIdentity, getStoredCommitIdentity, setCommitIdentity } from "@agents-in-the-cloud/workspace-templates";
 import { agentsInTheCloudUrlHtml } from "../agents-in-the-cloud-url.ts";
 import { resetOnboarding } from "../onboarding/state.ts";
@@ -65,7 +66,7 @@ function renderForceDeleteWorkspaces(result?: WorkspaceCleanupResult): string {
   </div>`;
 }
 
-function renderResetSettings(): string {
+function renderResetSettings(leftover?: string): string {
   const confirmation = destructiveConfirmationHtml({
     id: "delete_all_settings",
     trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Delete all settings" } },
@@ -75,14 +76,15 @@ function renderResetSettings(): string {
   return `<div class="developer-tools-action">
     <div class="developer-tools-copy">
       <div>Stored settings</div>
-      <p>Delete the Commit identity, GitHub token, and model provider credentials stored by AgentsInTheCloud.</p>
+      <p>Delete the Commit identity, GitHub token, model provider credentials, and LXD connection stored by AgentsInTheCloud.</p>
+      ${leftover ? `<p class="settings-error">${escapeHtml(leftover)}</p>` : ""}
     </div>
     <div class="developer-tools-control"><form method="post" action="/settings/reset" data-turbo="true">${confirmation}</form></div>
   </div>`;
 }
 
-async function renderDeveloperTools(): Promise<string> {
-  const destructiveActions = `${renderResetSettings()}${forceDeleteWorkspacesEnabled() ? renderForceDeleteWorkspaces() : ""}`;
+async function renderDeveloperTools(resetLeftover?: string): Promise<string> {
+  const destructiveActions = `${renderResetSettings(resetLeftover)}${forceDeleteWorkspacesEnabled() ? renderForceDeleteWorkspaces() : ""}`;
   return `<section class="settings-sec settings-sec-developer-tools">${destructiveActions}</section>`;
 }
 
@@ -99,11 +101,11 @@ export const appSettingsFrameId = "app_settings_frame";
 const disclosureSections = new Set(["models", globalWorkspaceSettingsSectionId, "host", "developer-tools"]);
 const sectionFrameId = (id: string) => `app_settings_section_${id}`;
 
-async function renderSettingsSectionFrame(id: string): Promise<string> {
+async function renderSettingsSectionFrame(id: string, resetLeftover?: string): Promise<string> {
   const section = listSettingsContributions().find(contribution => contribution.id === id);
   if (!section && id !== "developer-tools") throw invalidArguments(`settings section not found: ${id}`);
   const content = id === "developer-tools"
-    ? `${await renderDeveloperTools()}${actionLinkHtml({ href: "/design-system-catalogue.html", variant: "secondary", content: { kind: "caption", caption: "Design system catalogue" }, attributesHtml: 'data-turbo="false"' })}${renderBuildIdentity()}`
+    ? `${await renderDeveloperTools(resetLeftover)}${actionLinkHtml({ href: "/design-system-catalogue.html", variant: "secondary", content: { kind: "caption", caption: "Design system catalogue" }, attributesHtml: 'data-turbo="false"' })}${renderBuildIdentity()}`
     : await section!.render();
   return `<turbo-frame class="app-settings-section-frame" id="${sectionFrameId(id)}">${disclosureSections.has(id) ? `<div class="app-settings-expanded">${content}</div>` : content}</turbo-frame>`;
 }
@@ -144,13 +146,15 @@ export async function renderDeveloperToolsSettings(request: Request): Promise<st
   return renderAppSettings(request, "developer-tools");
 }
 
-async function deleteAllStoredSettings(): Promise<void> {
+/** Returns what's left to clean up by hand. */
+async function deleteAllStoredSettings(): Promise<string | undefined> {
   await resetOnboarding();
   clearGitHubToken();
   await clearCommitIdentity();
   await setEnabledModels([]);
   const runtime = await createPiModelRuntime();
   for (const credential of await runtime.listCredentials()) await runtime.logout(credential.providerId);
+  return await disconnectLxd();
 }
 
 export async function handleSettingsPageRequest(request: Request, url: URL, options: { forceDeleteAllWorkspaces?: () => Promise<WorkspaceCleanupResult>; renderModelPickerUpdates: () => Promise<string> }): Promise<Response | undefined> {
@@ -167,9 +171,9 @@ export async function handleSettingsPageRequest(request: Request, url: URL, opti
     return wantsStream(request) ? stream(update("app_settings_host", html)) : response(html);
   }
   if (url.pathname === "/settings/reset" && request.method === "POST") {
-    await deleteAllStoredSettings();
+    const leftover = await deleteAllStoredSettings();
     const pickerUpdates = await options.renderModelPickerUpdates();
-    return stream(`${pickerUpdates}${replace(appSettingsFrameId, await renderSettingsFrame(request, "developer-tools"))}${update("onboarding_modal_host", await renderOnboardingDialog())}${remove(modelsDialogId)}`);
+    return stream(`${pickerUpdates}${replace(appSettingsFrameId, await renderSettingsFrame(request, "developer-tools"))}${leftover ? replace(sectionFrameId("developer-tools"), await renderSettingsSectionFrame("developer-tools", leftover)) : ""}${update("onboarding_modal_host", await renderOnboardingDialog())}${remove(modelsDialogId)}`);
   }
   if (url.pathname === "/settings/workspaces/force-delete" && request.method === "POST" && forceDeleteWorkspacesEnabled()) {
     const result = options.forceDeleteAllWorkspaces

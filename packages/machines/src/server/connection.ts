@@ -1,8 +1,9 @@
 import { rm } from "node:fs/promises";
 import { AgentsInTheCloudCoreError, agentsInTheCloudDataPath, getAgentsInTheCloudRuntimeContext, readTextIfExists, writeJsonAtomic } from "@agents-in-the-cloud/core";
+import { errorMessage } from "@agents-in-the-cloud/shared";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import type { LxdConnection } from "../lxd/index.ts";
+import { certificateFingerprint, LxdServerClient, type LxdConnection } from "../lxd/index.ts";
 
 const storedConnectionSchema = Type.Object({
   server: Type.Object({ address: Type.String(), certificate: Type.String() }),
@@ -28,6 +29,16 @@ export async function saveLxdConnection(connection: LxdConnection): Promise<void
   await writeJsonAtomic(connectionPath(), { server: connection.server, project: connection.project, credentials: connection.credentials }, { mode: 0o600 });
 }
 
-export async function forgetLxdConnection(): Promise<void> {
+/** Forgets the LXD server and removes AITC's certificate there. If that fails, says how to remove it by hand. */
+export async function disconnectLxd(): Promise<string | undefined> {
+  const connection = await readLxdConnection();
+  if (!connection) return undefined;
+  let leftover: string | undefined;
+  try {
+    await new LxdServerClient(connection).removeOwnCertificate();
+  } catch (error) {
+    leftover = `AgentsInTheCloud forgot the LXD server at ${connection.server.address} but couldn't remove its certificate there (${errorMessage(error)}). To remove it yourself, run lxc config trust remove ${certificateFingerprint(connection.credentials.certificate)} on the server.`;
+  }
   await rm(connectionPath(), { force: true });
+  return leftover;
 }
