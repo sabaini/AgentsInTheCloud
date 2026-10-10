@@ -17,7 +17,8 @@ function describeMachine(machine: MachineView): string {
   switch (machine.state) {
     case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${snapshots}`;
     case "creating": return `${machine.name} is being created: ${what}. Wait for it with wait_for_machine.`;
-    case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.`;
+    case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.${snapshots}`;
+    case "paused": return `${machine.name} is paused while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
     case "failed": return `${machine.name} couldn't be set up: ${machine.error}. Release it with release_machine.`;
     case "missing": return `${machine.name} is gone from the LXD server. Release it with release_machine.`;
