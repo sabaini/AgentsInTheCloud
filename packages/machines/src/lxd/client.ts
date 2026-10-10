@@ -267,7 +267,15 @@ export class LxdClient extends LxdServerClient {
     const started = await this.receive(execStarted, await this.send("POST", path, { command, environment, interactive: false, "wait-for-websocket": true, "record-output": false }), what);
     const { fds } = started.metadata.metadata;
     // LXD starts the command only once every stream is connected.
-    const [control, stdin, stdout, stderr] = await Promise.all([fds.control, fds["0"], fds["1"], fds["2"]].map(secret => LxdWebSocket.connect(this.connection, this.url(`${started.operation}/websocket`, { secret }))));
+    const connecting = await Promise.allSettled([fds.control, fds["0"], fds["1"], fds["2"]].map(secret => LxdWebSocket.connect(this.connection, this.url(`${started.operation}/websocket`, { secret }))));
+    const connected = connecting.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    const refused = connecting.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (refused) {
+      // Without every stream the command never starts, so the others would only wait.
+      for (const stream of connected) stream.destroy();
+      throw refused.reason;
+    }
+    const [control, stdin, stdout, stderr] = connected;
     const drainControl = async () => { for await (const _ of control!.messages()) { /* nothing on it needs a response */ } };
     // stdout, stderr and control end when LXD closes them. Nothing reads stdin, so release it here.
     const finish = async () => {

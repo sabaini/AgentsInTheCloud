@@ -12,7 +12,7 @@ import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdC
 import { LxdWebSocket } from "../src/lxd/websocket.ts";
 
 type Fd = "0" | "1" | "2" | "control";
-interface ExecSession { running: boolean; sockets: Map<Fd, ServerWebSocket<Upgrade>>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
+interface ExecSession { running: boolean; sockets: Map<Fd, ServerWebSocket<Upgrade>>; closed: Set<Fd>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
 type OperationResult = { status_code: number; err: string; metadata: { return: number } | null };
 interface Upgrade { session: ExecSession; fd: Fd }
 
@@ -26,6 +26,7 @@ let fake: Server<Upgrade>;
 let trusted = false;
 const operations = new Map<string, Promise<OperationResult | { error: string }>>();
 const execSessions = new Map<string, { session: ExecSession; fd: Fd }>();
+let halfSession: ExecSession | undefined;
 
 const sync = (metadata: JsonValue) => Response.json({ type: "sync", status: "Success", status_code: 200, operation: "", error_code: 0, error: "", metadata });
 const failure = (code: number, error: string) => Response.json({ type: "error", status: "", status_code: 0, operation: "", error_code: code, error, metadata: null }, { status: code });
@@ -77,14 +78,16 @@ beforeAll(async () => {
         return operation(Promise.resolve(body.name === "broken" ? { status_code: 400, err: "Failed creating instance record: broken image", metadata: null } : { status_code: 200, err: "", metadata: null }));
       }
       if (path === "/1.0/instances/box/files") return url.searchParams.get("path") === "/etc/hostname" ? new Response("box\n") : failure(404, "Not Found");
-      const exec = path.match(/^\/1\.0\/instances\/(box|booting)\/exec$/);
+      const exec = path.match(/^\/1\.0\/instances\/(box|booting|half)\/exec$/);
       if (exec && request.method === "POST") {
         // A VM whose agent isn't up yet: once the streams connect, LXD closes them all and fails the operation.
-        const running = exec[1] === "box";
-        const session: ExecSession = { running, sockets: new Map(), opened: Promise.withResolvers(), finished: Promise.withResolvers() };
+        const running = exec[1] !== "booting";
+        const session: ExecSession = { running, sockets: new Map(), closed: new Set(), opened: Promise.withResolvers(), finished: Promise.withResolvers() };
+        if (exec[1] === "half") halfSession = session;
         const fds = Object.fromEntries((["0", "1", "2", "control"] as const).map(fd => {
           const secret = crypto.randomUUID();
-          execSessions.set(secret, { session, fd });
+          // On half, stderr's WebSocket is refused.
+          if (exec[1] !== "half" || fd !== "2") execSessions.set(secret, { session, fd });
           return [fd, secret];
         }));
         return operation(running
@@ -121,6 +124,7 @@ beforeAll(async () => {
         if (socket.data.fd === "0") socket.data.session.sockets.get("1")!.send(message);
       },
       async close(socket) {
+        socket.data.session.closed.add(socket.data.fd);
         if (socket.data.fd !== "0" || !socket.data.session.running) return;
         await socket.data.session.opened.promise;
         for (const fd of ["1", "2", "control"] as const) socket.data.session.sockets.get(fd)!.close(1000);
@@ -198,6 +202,12 @@ test("exec streams large stdin and stdout through pinned WebSockets", async () =
 
 test("exec fails with LXD's error when the command can't start", async () => {
   await expect(client().run("booting", ["true"])).rejects.toThrow("LXD VM agent is not currently running");
+});
+
+test("exec closes the streams it connected when another one is refused", async () => {
+  await expect(client().run("half", ["true"])).rejects.toThrow("LXD refused the WebSocket (HTTP/1.1 403 Forbidden)");
+  while (halfSession!.closed.size < 3) await Bun.sleep(10);
+  expect([...halfSession!.closed].sort()).toEqual(["0", "1", "control"]);
 });
 
 test("a stream LXD pings, closes and drops at once ends without waiting for answers", async () => {
