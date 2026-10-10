@@ -53,7 +53,7 @@ export interface MachineLeaseDependencies<Lxd extends MachineLxd = MachineLxd> {
   changed(workspaceId: string, leases: MachineLease[]): Promise<void>;
 }
 
-export type MachineState = "creating" | "starting" | "ready" | "stopped" | "failed" | "missing" | "disconnected";
+export type MachineState = "creating" | "starting" | "ready" | "paused" | "stopped" | "failed" | "missing" | "disconnected";
 
 export interface MachineView {
   name: string;
@@ -148,7 +148,9 @@ async function within(done: Promise<void>, ms: number, signal?: AbortSignal): Pr
 function stateOf(lease: MachineLease, instance: LxdInstance | undefined): MachineState {
   if (lease.status !== "ready") return lease.status;
   if (!instance) return "missing";
-  return instance.status === "Running" ? "ready" : "stopped";
+  if (instance.status === "Running") return "ready";
+  // A snapshot pauses a machine while its disks are saved.
+  return instance.status === "Frozen" ? "paused" : "stopped";
 }
 
 function viewOf(lease: MachineLease, state: MachineState, snapshots: string[]): MachineView {
@@ -333,7 +335,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     return await Promise.all(leases.map(async (lease) => {
       if (!here(lease)) return viewOf(lease, "disconnected", []);
       const instance = instances.get(lease.instance);
-      return viewOf(lease, stateOf(lease, instance), lease.status === "ready" && instance ? await lxd.snapshots(lease.instance) : []);
+      return viewOf(lease, stateOf(lease, instance), instance ? await lxd.snapshots(lease.instance) : []);
     }));
   }
 

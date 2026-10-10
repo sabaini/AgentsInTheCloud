@@ -132,9 +132,13 @@ test("snapshots restore a machine and wait for it to come back", async () => {
   await expect(leases.snapshot("w1", "node-1", "clean slate")).rejects.toThrow("Snapshot names");
   expect((await leases.snapshot("w1", "node-1", "clean")).snapshots).toEqual(["clean"]);
   const instance = lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!;
+  instance.status = "Frozen";
+  expect((await leases.list("w1"))[0]!.state).toBe("paused");
   instance.status = "Stopped";
   expect((await leases.list("w1"))[0]!.state).toBe("stopped");
-  expect(await leases.restore("w1", "node-1", "clean", 5_000)).toMatchObject({ state: "ready", snapshots: ["clean"] });
+  // Booting again, it still has its snapshots.
+  expect(await leases.restore("w1", "node-1", "clean", 0)).toMatchObject({ state: "starting", snapshots: ["clean"] });
+  expect(await leases.waitFor("w1", "node-1", 5_000)).toMatchObject({ state: "ready", snapshots: ["clean"] });
   expect(instance.status).toBe("Running");
   await expect(leases.restore("w1", "node-1", "missing", 5_000)).rejects.toThrow("node-1 has no snapshot called missing");
   expect(instance.status).toBe("Running");

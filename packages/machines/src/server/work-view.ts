@@ -18,6 +18,7 @@ const states = {
   creating: { label: "Being created", dot: "running" },
   starting: { label: "Booting", dot: "running" },
   ready: { label: "Ready", dot: "success" },
+  paused: { label: "Paused while a snapshot is saved", dot: "running" },
   stopped: { label: "Stopped, starts again when it’s next used", dot: "" },
   failed: { label: "Couldn’t be set up", dot: "danger" },
   missing: { label: "Gone from the LXD server", dot: "warning" },
