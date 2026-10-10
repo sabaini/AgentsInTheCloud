@@ -20,6 +20,8 @@ function describeMachine(machine: MachineView): string {
     case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "paused": return `${machine.name} is paused while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
+    case "restoring": return `${machine.name} is being restored to a snapshot: ${what}.${snapshots}`;
+    case "interrupted": return `${machine.name} didn't finish restoring to a snapshot (${machine.error}), so its disks may be from different points in time: ${what}. It stays stopped until restore_machine succeeds, or release it with release_machine.${snapshots}`;
     case "failed": return `${machine.name} couldn't be set up: ${machine.error}. Release it with release_machine.`;
     case "missing": return `${machine.name} is gone from the LXD server. Release it with release_machine.`;
     case "disconnected": return `${machine.name} is on an LXD server that isn't connected now: ${what}. It can be used or released once the user connects that server again in Settings, under Machines.`;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LxdRequestError } from "../src/lxd/index.ts";
 import { createMachineLeases, machineInstanceName, type MachineLeaseDependencies, type MachineSettings } from "../src/server/leases.ts";
 import { clientProfile as client, FakeLxd, nodeProfile as node } from "./fake-lxd.ts";
 
@@ -165,6 +166,33 @@ test("a snapshot has what the machine has written and its extra disks too, saved
   // Releasing takes the disks' snapshots along with them.
   await leases.release("w1", "node-1");
   expect(lxd.volumeSnapshots.size).toBe(0);
+});
+
+test("a machine whose restore doesn't finish stays stopped until one does", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  await leases.snapshot("w1", "node-1", "clean");
+  const restoreVolume = lxd.restoreVolumeSnapshot.bind(lxd);
+  lxd.restoreVolumeSnapshot = async (pool, volume, snapshot) => {
+    if (volume.endsWith("-disk2")) throw new LxdRequestError(500, "No space left on device");
+    await restoreVolume(pool, volume, snapshot);
+  };
+  await expect(leases.restore("w1", "node-1", "clean", 5_000)).rejects.toThrow("No space left on device");
+  expect(await leases.list("w1")).toMatchObject([{ state: "interrupted", error: "No space left on device" }]);
+  // Neither ssh nor list_machines starts it with its first disk restored and the others not.
+  await leases.usable("w1", "node-1", 5_000);
+  await leases.wake("w1");
+  expect(lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!.status).toBe("Stopped");
+  await expect(leases.snapshot("w1", "node-1", "later")).rejects.toThrow("isn't ready");
+
+  // Nor after AgentsInTheCloud restarts in the middle of a restore.
+  lxd.restoreVolumeSnapshot = () => new Promise(() => {});
+  void leases.restore("w1", "node-1", "clean", 5_000);
+  while ((await leases.list("w1"))[0]!.state !== "restoring") await Bun.sleep(1);
+  const restarted = createMachineLeases(dependencies());
+  expect(await restarted.list("w1")).toMatchObject([{ state: "interrupted", error: "AgentsInTheCloud restarted before it finished" }]);
+  lxd.restoreVolumeSnapshot = restoreVolume;
+  expect((await restarted.restore("w1", "node-1", "clean", 5_000)).state).toBe("ready");
 });
 
 test("a snapshot unfreezes the machine even when showing it paused fails", async () => {

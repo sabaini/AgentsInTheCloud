@@ -25,7 +25,7 @@ const leaseSchema = Type.Object({
   volumes: Type.Array(Type.String()),
   createdAt: Type.Number(),
   expiresAt: Type.Number(),
-  status: Type.Union([Type.Literal("creating"), Type.Literal("starting"), Type.Literal("ready"), Type.Literal("failed")]),
+  status: Type.Union([Type.Literal("creating"), Type.Literal("starting"), Type.Literal("ready"), Type.Literal("restoring"), Type.Literal("failed")]),
   error: Type.Optional(Type.String()),
   /** `type base64` lines, for the workspace's known_hosts. */
   hostKeys: Type.Array(Type.String()),
@@ -53,7 +53,8 @@ export interface MachineLeaseDependencies<Lxd extends MachineLxd = MachineLxd> {
   changed(workspaceId: string, leases: MachineLease[]): Promise<void>;
 }
 
-export type MachineState = "creating" | "starting" | "ready" | "paused" | "stopped" | "failed" | "missing" | "disconnected";
+/** An interrupted machine didn't finish restoring, so its disks may be from different points in time; it stays stopped until a restore does. */
+export type MachineState = "creating" | "starting" | "ready" | "paused" | "stopped" | "restoring" | "interrupted" | "failed" | "missing" | "disconnected";
 
 export interface MachineView {
   name: string;
@@ -145,7 +146,8 @@ async function within(done: Promise<void>, ms: number, signal?: AbortSignal): Pr
   }
 }
 
-function stateOf(lease: MachineLease, instance: LxdInstance | undefined): MachineState {
+function stateOf(lease: MachineLease, instance: LxdInstance | undefined, restoring: boolean): MachineState {
+  if (lease.status === "restoring") return restoring ? "restoring" : "interrupted";
   if (lease.status !== "ready") return lease.status;
   if (!instance) return "missing";
   if (instance.status === "Running") return "ready";
@@ -165,6 +167,7 @@ function viewOf(lease: MachineLease, state: MachineState, snapshots: string[]): 
     snapshots,
   };
   if (lease.error) view.error = lease.error;
+  else if (state === "interrupted") view.error = "AgentsInTheCloud restarted before it finished";
   return view;
 }
 
@@ -174,6 +177,8 @@ interface Task { controller: AbortController; done: Promise<void> }
 export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDependencies<Lxd>) {
   const serialize = createKeyedOperationQueue();
   const tasks = new Map<string, Task>();
+  /** Machines being restored right now; a lease left restoring otherwise was interrupted. */
+  const restoring = new Set<string>();
   /** Workspaces being deleted, which can't have new machines. */
   const closing = new Set<string>();
   const taskKey = (workspaceId: string, name: string) => `${workspaceId}\0${name}`;
@@ -335,7 +340,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     return await Promise.all(leases.map(async (lease) => {
       if (!here(lease)) return viewOf(lease, "disconnected", []);
       const instance = instances.get(lease.instance);
-      return viewOf(lease, stateOf(lease, instance), instance ? await lxd.snapshots(lease.instance) : []);
+      return viewOf(lease, stateOf(lease, instance, restoring.has(taskKey(workspaceId, lease.name))), instance ? await lxd.snapshots(lease.instance) : []);
     }));
   }
 
@@ -419,19 +424,34 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
   }
 
   async function restore(workspaceId: string, name: string, snapshotName: string, waitMs: number, signal?: AbortSignal): Promise<MachineView> {
+    const key = taskKey(workspaceId, name);
     const lxd = await serialize(workspaceId, async () => {
-      const lease = await find(workspaceId, name);
-      if (lease.status !== "ready") throw refused(`${name} isn't ready yet, so it can't be restored`);
+      const leases = await readLeases(workspaceId);
+      const lease = leases.find((candidate) => candidate.name === name);
+      if (!lease) throw refused(`This workspace has no machine called ${name}`);
+      // One whose last restore didn't finish can be restored again.
+      if (lease.status !== "ready" && lease.status !== "restoring") throw refused(`${name} isn't ready yet, so it can't be restored`);
       const lxd = await lxdFor(lease);
       if (!(await lxd.snapshots(lease.instance)).includes(snapshotName)) throw refused(`${name} has no snapshot called ${snapshotName}`);
-      // Its disks can't be restored while it runs, and what it's running is about to be discarded.
-      if ((await lxd.instance(lease.instance)).status !== "Stopped") await lxd.setInstanceState(lease.instance, "stop", true);
-      for (const volume of lease.volumes) await lxd.restoreVolumeSnapshot(lease.pool!, volume, snapshotName);
-      await lxd.restoreSnapshot(lease.instance, snapshotName);
-      await lxd.setInstanceState(lease.instance, "start");
-      const leases = await readLeases(workspaceId);
-      leases.find((candidate) => candidate.name === name)!.status = "starting";
-      await writeLeases(workspaceId, leases);
+      // Until every disk is back, they're from different points in time, so nothing may start the machine meanwhile.
+      lease.status = "restoring";
+      delete lease.error;
+      restoring.add(key);
+      try {
+        await writeLeases(workspaceId, leases);
+        // Its disks can't be restored while it runs, and what it's running is about to be discarded.
+        if ((await lxd.instance(lease.instance)).status !== "Stopped") await lxd.setInstanceState(lease.instance, "stop", true);
+        for (const volume of lease.volumes) await lxd.restoreVolumeSnapshot(lease.pool!, volume, snapshotName);
+        await lxd.restoreSnapshot(lease.instance, snapshotName);
+        await lxd.setInstanceState(lease.instance, "start");
+        lease.status = "starting";
+      } catch (error) {
+        lease.error = errorMessage(error);
+        throw error;
+      } finally {
+        restoring.delete(key);
+        await writeLeases(workspaceId, leases);
+      }
       return lxd;
     });
     const task = start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal)));

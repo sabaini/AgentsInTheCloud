@@ -20,6 +20,8 @@ const states = {
   ready: { label: "Ready", dot: "success" },
   paused: { label: "Paused while a snapshot is saved", dot: "running" },
   stopped: { label: "Stopped, starts again when it’s next used", dot: "" },
+  restoring: { label: "Being restored to a snapshot", dot: "running" },
+  interrupted: { label: "Stopped, as restoring it didn’t finish", dot: "danger" },
   failed: { label: "Couldn’t be set up", dot: "danger" },
   missing: { label: "Gone from the LXD server", dot: "warning" },
   disconnected: { label: "On an LXD server that isn’t connected now", dot: "warning" },
