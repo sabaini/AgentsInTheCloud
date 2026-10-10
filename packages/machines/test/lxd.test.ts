@@ -77,6 +77,15 @@ beforeAll(async () => {
         const body = await request.json();
         return operation(Promise.resolve(body.name === "broken" ? { status_code: 400, err: "Failed creating instance record: broken image", metadata: null } : { status_code: 200, err: "", metadata: null }));
       }
+      if (path === "/1.0/instances/box" && request.method === "GET" && url.searchParams.get("recursion") === "1") {
+        const address = (family: string, address: string, scope: string) => ({ family, address, netmask: "64", scope });
+        return sync({ name: "box", snapshots: [{ name: "clean" }], state: { status: "Running", network: {
+          lo: { host_name: "", addresses: [address("inet", "127.0.0.1", "local")] },
+          docker0: { host_name: "", addresses: [address("inet", "172.17.0.1", "global")] },
+          enp5s0: { host_name: "tap6101283", addresses: [address("inet6", "fd42::5", "global"), address("inet6", "fe80::5", "link"), address("inet", "10.1.0.5", "global")] },
+        } } });
+      }
+      if (path === "/1.0/instances/stopped" && request.method === "GET") return sync({ name: "stopped", snapshots: null, state: { status: "Stopped", network: null } });
       if (path === "/1.0/instances/box/files") return url.searchParams.get("path") === "/etc/hostname" ? new Response("box\n") : failure(404, "Not Found");
       const exec = path.match(/^\/1\.0\/instances\/(box|booting|half)\/exec$/);
       if (exec && request.method === "POST") {
@@ -184,6 +193,11 @@ test("failed operations surface LXD's own error", async () => {
   const failed = client().createInstance({ name: "broken", type: "virtual-machine", source: { type: "image", alias: "24.04" } });
   await expect(failed).rejects.toThrow("Failed creating instance record: broken image");
   await expect(failed).rejects.toBeInstanceOf(LxdRequestError);
+});
+
+test("an instance's addresses are those of its LXD network devices, IPv4 first, and it has none while stopped", async () => {
+  expect(await client().details("box")).toEqual({ snapshots: ["clean"], addresses: ["10.1.0.5", "fd42::5"] });
+  expect(await client().details("stopped")).toEqual({ snapshots: [], addresses: [] });
 });
 
 test("missing files read as undefined", async () => {

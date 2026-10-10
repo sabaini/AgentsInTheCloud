@@ -152,7 +152,7 @@ const jsonResult = (description: string) => ({ "200": { description, content: { 
 
 export const machinesOpenApiPaths = {
   "/workspaces/{id}/machines": {
-    get: { summary: "List a workspace's test machines, the profiles it may create them from, and how many it may hold", parameters: [workspaceIdParameter], responses: jsonResult("Machines with name, profile, type, image, state, expiry and snapshots") },
+    get: { summary: "List a workspace's test machines, the profiles it may create them from, and how many it may hold", parameters: [workspaceIdParameter], responses: jsonResult("Machines with name, profile, type, image, state, addresses, expiry and snapshots") },
     post: {
       summary: "Create a test machine for a workspace from one of its template's machine profiles",
       description: "Waits up to 4 minutes for the machine to boot and returns its state. A machine still booting keeps booting; listing the workspace's machines shows when it's ready. Needs an LXD server connected in Settings.",

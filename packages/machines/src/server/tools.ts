@@ -14,8 +14,9 @@ function describeMachine(machine: MachineView): string {
   const disks = machine.diskSizesGiB.length ? ` with ${machine.diskSizesGiB.length === 1 ? "an extra disk" : `${machine.diskSizesGiB.length} extra disks`} (${machine.diskSizesGiB.join(", ")} GiB)` : "";
   const what = `a ${kind(machine.type)} from ${machine.image}${disks}, made from profile ${machine.profile}, until ${machine.expiresAt}`;
   const snapshots = machine.snapshots.length ? ` Snapshots: ${machine.snapshots.join(", ")}.` : "";
+  const addresses = machine.addresses.length ? ` Other machines reach it at ${machine.addresses.join(" or ")}, not by name.` : "";
   switch (machine.state) {
-    case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${snapshots}`;
+    case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${addresses}${snapshots}`;
     case "creating": return `${machine.name} is being created: ${what}. Wait for it with wait_for_machine.`;
     case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "paused": return `${machine.name} is paused while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
@@ -49,7 +50,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("acquire_machine", (workspaceId) => defineWorkspaceTool({
       name: "acquire_machine",
       label: "Acquire Machine",
-      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Once it has booted, `ssh <name>` reaches it from this workspace as ubuntu, with passwordless sudo; scp, rsync and tools like juju or ansible can use the name too. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
+      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Once it has booted, `ssh <name>` reaches it from this workspace as ubuntu, with passwordless sudo; scp, rsync and tools like juju or ansible can use the name too. Machines reach each other at the addresses list_machines reports, not by name. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
       parameters: Type.Object({
         profile: Type.String({ description: "Name of the machine profile to use." }),
         name: Type.Optional(Type.String({ description: "Name for the machine: lowercase letters, digits and hyphens. Defaults to the profile name and a number, like node-1." })),
@@ -62,7 +63,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("list_machines", (workspaceId) => defineWorkspaceTool({
       name: "list_machines",
       label: "List Machines",
-      description: "List this workspace's test machines with their state and expiry, and the machine profiles new ones can be created from. Machines stopped while the workspace was parked start again.",
+      description: "List this workspace's test machines with their state, addresses and expiry, and the machine profiles new ones can be created from. Machines stopped while the workspace was parked start again.",
       parameters: Type.Object({}),
       execute: async () => {
         await leases.wake(workspaceId);

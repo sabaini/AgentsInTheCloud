@@ -6,7 +6,7 @@ import { errorMessage } from "@agents-in-the-cloud/shared";
 import { machineImageServers, type WorkspaceTemplateMachineProfile } from "@agents-in-the-cloud/workspace-templates";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
-import { LxdRequestError, sameLxdLocation, type LxdClient, type LxdInstance, type LxdInstancesPost } from "../lxd/index.ts";
+import { LxdRequestError, sameLxdLocation, type LxdClient, type LxdInstance, type LxdInstanceDetails, type LxdInstancesPost } from "../lxd/index.ts";
 
 const leaseSchema = Type.Object({
   name: Type.String(),
@@ -33,7 +33,7 @@ const leaseSchema = Type.Object({
 const leaseStoreSchema = Type.Object({ leases: Type.Array(leaseSchema) });
 export type MachineLease = Static<typeof leaseSchema>;
 
-export type MachineLxd = Pick<LxdClient, "location" | "instances" | "instance" | "profileDevices" | "createBlockVolume" | "deleteVolume" | "createVolumeSnapshot" | "restoreVolumeSnapshot" | "createInstance" | "setInstanceState" | "deleteInstance" | "readInstanceFile" | "run" | "snapshots" | "createSnapshot" | "restoreSnapshot">;
+export type MachineLxd = Pick<LxdClient, "location" | "instances" | "instance" | "profileDevices" | "createBlockVolume" | "deleteVolume" | "createVolumeSnapshot" | "restoreVolumeSnapshot" | "createInstance" | "setInstanceState" | "deleteInstance" | "readInstanceFile" | "run" | "details" | "snapshots" | "createSnapshot" | "restoreSnapshot">;
 
 export interface MachineSettings {
   profiles: WorkspaceTemplateMachineProfile[];
@@ -65,6 +65,8 @@ export interface MachineView {
   image: string;
   diskSizesGiB: number[];
   state: MachineState;
+  /** Where the workspace's other machines reach it, while it runs; they don't know its name. */
+  addresses: string[];
   expiresAt: string;
   snapshots: string[];
   error?: string;
@@ -157,7 +159,9 @@ function stateOf(lease: MachineLease, instance: LxdInstance | undefined, restori
   return instance.status === "Frozen" ? "paused" : "stopped";
 }
 
-function viewOf(lease: MachineLease, state: MachineState, snapshots: string[]): MachineView {
+const unknownDetails: LxdInstanceDetails = { snapshots: [], addresses: [] };
+
+function viewOf(lease: MachineLease, state: MachineState, { snapshots, addresses }: LxdInstanceDetails): MachineView {
   const view: MachineView = {
     name: lease.name,
     profile: lease.profile.name,
@@ -165,6 +169,7 @@ function viewOf(lease: MachineLease, state: MachineState, snapshots: string[]): 
     image: lease.profile.image,
     diskSizesGiB: lease.profile.diskSizesGiB,
     state,
+    addresses,
     expiresAt: new Date(lease.expiresAt).toISOString(),
     snapshots,
   };
@@ -340,9 +345,9 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     }
     const instances = new Map((await lxd.instances()).map((instance) => [instance.name, instance]));
     return await Promise.all(leases.map(async (lease) => {
-      if (!here(lease)) return viewOf(lease, "disconnected", []);
+      if (!here(lease)) return viewOf(lease, "disconnected", unknownDetails);
       const instance = instances.get(lease.instance);
-      return viewOf(lease, stateOf(lease, instance, restoring.has(taskKey(workspaceId, lease.name))), instance ? await lxd.snapshots(lease.instance) : []);
+      return viewOf(lease, stateOf(lease, instance, restoring.has(taskKey(workspaceId, lease.name))), instance ? await lxd.details(lease.instance) : unknownDetails);
     }));
   }
 

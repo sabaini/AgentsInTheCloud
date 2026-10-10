@@ -2,8 +2,9 @@
  * connect it to an LXD server with a restricted token, give a template a container profile, and have a
  * workspace's Agent create a machine, write to it with plain ssh, and snapshot it. Parking stops the machine;
  * after unparking, the Agent wakes it with ssh and restores the snapshot. The HTTP API creates a second machine,
- * refuses a third and releases it, and deleting the workspace asks before deleting the first. Every check looks
- * at LXD or the API, not at what the Agent says. Images the machines needed are deleted again afterwards.
+ * which the first reaches at the address the API reports, refuses a third and releases it, and deleting the
+ * workspace asks before deleting the first. Every check looks at LXD or the API, not at what the Agent says.
+ * Images the machines needed are deleted again afterwards.
  *
  * Needs `lxc` with admin access to the server, and an AgentsInTheCloud that isn't connected to LXD yet, with a
  * model provider. The Agent makes fewer than ten small model requests; pick a cheap model with --model.
@@ -32,7 +33,7 @@ interface Workspace {
   phase: { kind: string; status?: string; deletion?: { status: string; fingerprint?: string } };
   agents?: { id: string; agentTypeId: string; busy: boolean }[];
 }
-interface Machine { name: string; state: string; snapshots: string[] }
+interface Machine { name: string; state: string; addresses: string[]; snapshots: string[] }
 
 async function command(program: string, ...args: string[]): Promise<string> {
   const child = Bun.spawn([program, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -161,9 +162,13 @@ try {
     assert.equal(await inBox("cat /root/functional"), nonce);
   });
 
-  await step("the HTTP API creates box-2, refuses a third machine, and releases box-2", async () => {
+  await step("the HTTP API creates box-2, which box-1 reaches at its address, refuses a third machine, and releases box-2", async () => {
     const { machine } = await api<{ machine: Machine }>("POST", `/workspaces/${workspaceId}/machines`, { profile: "box" });
     assert.deepEqual([machine.name, machine.state], ["box-2", "ready"]);
+    const [address] = machine.addresses;
+    const listed = (await instances("n4")).split("\n").find((line) => line.startsWith(`${machineInstanceName(workspaceId, "box-2")},`));
+    assert.ok(address && listed?.includes(address), `box-2's address ${address} isn't one LXD lists: ${listed}`);
+    await inBox(`nc -z -w 5 ${address} 22`);
     const third = await send("POST", `/workspaces/${workspaceId}/machines`, { profile: "box" });
     assert.equal(third.status, 409, third.text);
     assert.match(third.text, /already has 2 of its 2 machines/);

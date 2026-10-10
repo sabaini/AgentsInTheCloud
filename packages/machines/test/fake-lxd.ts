@@ -3,7 +3,7 @@ import { LxdRequestError, type LxdInstance, type LxdInstancesPost, type LxdLocat
 import type { MachineLxd } from "../src/server/leases.ts";
 
 type LxdDevices = Record<string, Record<string, string>>;
-interface FakeInstance extends LxdInstance { post: LxdInstancesPost; snapshots: string[]; probesUntilBooted: number; cloudInitReadsLeft: number; files: Map<string, string> }
+interface FakeInstance extends LxdInstance { post: LxdInstancesPost; snapshots: string[]; address: string; probesUntilBooted: number; cloudInitReadsLeft: number; files: Map<string, string> }
 
 /** Just enough LXD for leases: VMs whose agent answers only after a few probes, like a booting VM. */
 export class FakeLxd implements MachineLxd {
@@ -56,7 +56,7 @@ export class FakeLxd implements MachineLxd {
   }
   async createInstance(post: LxdInstancesPost) {
     if (this.failCreate) throw new LxdRequestError(400, this.failCreate);
-    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, cloudInitReadsLeft: 0, files: new Map(this.hostKeys) });
+    this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], address: `10.0.0.${this.instancesByName.size + 2}`, probesUntilBooted: this.probesUntilBooted, cloudInitReadsLeft: 0, files: new Map(this.hostKeys) });
   }
   async setInstanceState(name: string, action: "start" | "stop" | "restart" | "freeze" | "unfreeze") {
     this.existing(name).status = action === "stop" ? "Stopped" : action === "freeze" ? "Frozen" : "Running";
@@ -83,6 +83,10 @@ export class FakeLxd implements MachineLxd {
     const instance = this.existing(name);
     this.log.push(`run ${command.join(" ")} in ${name} while ${instance.status}`);
     return { exitCode: 0, stdout: Buffer.alloc(0), stderr: "" };
+  }
+  async details(name: string) {
+    const instance = this.existing(name);
+    return { snapshots: instance.snapshots, addresses: instance.status === "Running" ? [instance.address] : [] };
   }
   async snapshots(name: string) { return this.existing(name).snapshots; }
   async createSnapshot(name: string, snapshot: string) {
