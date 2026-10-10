@@ -402,11 +402,9 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       }
       // Paused, its disks are saved as they were at one moment.
       const pause = running && lease.volumes.length > 0;
-      if (pause) {
-        await lxd.setInstanceState(lease.instance, "freeze");
-        await deps.changed(workspaceId, await readLeases(workspaceId));
-      }
+      if (pause) await lxd.setInstanceState(lease.instance, "freeze");
       try {
+        if (pause) await deps.changed(workspaceId, await readLeases(workspaceId));
         // Its extra disks aren't part of its own snapshot. That comes last, so a listed snapshot has every disk.
         for (const volume of lease.volumes) await lxd.createVolumeSnapshot(lease.pool!, volume, snapshotName);
         await lxd.createSnapshot(lease.instance, snapshotName);
