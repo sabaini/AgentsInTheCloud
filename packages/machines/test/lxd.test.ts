@@ -194,10 +194,17 @@ test("missing files read as undefined", async () => {
 test("exec streams large stdin and stdout through pinned WebSockets", async () => {
   const input = Buffer.alloc(1024 * 1024 + 7, "x");
   input.write("first line\n");
-  const result = await client().run("box", ["cat"], input);
+  const result = await client().run("box", ["cat"], input, input.length);
   expect(result.exitCode).toBe(3);
   expect(result.stderr).toBe("");
   expect(result.stdout.equals(input)).toBe(true);
+});
+
+test("exec keeps only as much output as asked for, and still runs the command to the end", async () => {
+  const input = Buffer.alloc(256 * 1024, "x");
+  const result = await client().run("box", ["cat"], input, 1000);
+  expect(result.exitCode).toBe(3);
+  expect(result.stdout.equals(input.subarray(0, 1000))).toBe(true);
 });
 
 test("exec fails with LXD's error when the command can't start", async () => {

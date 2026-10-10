@@ -73,7 +73,7 @@ try {
 
   const payload = Buffer.alloc(16 * 1024 * 1024, "lxd exec stream\n");
   await step(`stream ${payload.length / 1024 / 1024} MiB through cat and back`, async () => {
-    const result = await lxd.run(instance, ["cat"], payload);
+    const result = await lxd.run(instance, ["cat"], payload, payload.length);
     assert.equal(result.exitCode, 0);
     assert(result.stdout.equals(payload), `got ${result.stdout.length} bytes back`);
   });

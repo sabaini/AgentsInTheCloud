@@ -298,12 +298,20 @@ export class LxdClient extends LxdServerClient {
     };
   }
 
-  /** Run a command to completion and collect its output. */
-  async run(instance: string, command: string[], input?: Uint8Array): Promise<{ exitCode: number; stdout: Buffer; stderr: string }> {
+  /**
+   * Run a command to completion and collect its output. The instance decides how much it writes, so only the first
+   * `keepBytes` of each stream are kept; the rest is read and dropped.
+   */
+  async run(instance: string, command: string[], input?: Uint8Array, keepBytes = 1024 * 1024): Promise<{ exitCode: number; stdout: Buffer; stderr: string }> {
     const process = await this.exec(instance, command);
     const collect = async (stream: AsyncIterable<Buffer>) => {
       const chunks: Buffer[] = [];
-      for await (const chunk of stream) chunks.push(chunk);
+      let kept = 0;
+      for await (const chunk of stream) {
+        if (kept >= keepBytes) continue;
+        chunks.push(chunk.subarray(0, keepBytes - kept));
+        kept += chunks.at(-1)!.length;
+      }
       return Buffer.concat(chunks);
     };
     const feed = async () => {
