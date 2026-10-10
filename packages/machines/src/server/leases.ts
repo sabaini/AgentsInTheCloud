@@ -499,12 +499,23 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     await Promise.all(leases.filter((lease) => lease.status === "ready" && sameLxdLocation(lease.location, lxd.location) && statuses.get(lease.instance) === "Running").map((lease) => lxd.setInstanceState(lease.instance, "stop")));
   }
 
-  /** Releases the machines in the connected LXD project whose lifetime is over, returning their names. */
+  /**
+   * Releases the machines in the connected LXD project whose lifetime is over, returning their names. They're chosen
+   * and deleted in one go, so one released and made again under the same name meanwhile isn't taken for the old one.
+   * A machine that's booting waits for the next sweep.
+   */
   async function expire(workspaceId: string, now: number): Promise<string[]> {
-    const { location } = await connected();
-    const expired = (await readLeases(workspaceId)).filter((lease) => lease.expiresAt <= now && sameLxdLocation(lease.location, location));
-    for (const lease of expired) await release(workspaceId, lease.name);
-    return expired.map((lease) => lease.name);
+    const lxd = await connected();
+    return await serialize(workspaceId, async () => {
+      let leases = await readLeases(workspaceId);
+      const expired = leases.filter((lease) => lease.expiresAt <= now && sameLxdLocation(lease.location, lxd.location) && !tasks.has(taskKey(workspaceId, lease.name)));
+      for (const lease of expired) {
+        await destroy(lxd, lease);
+        leases = leases.filter((candidate) => candidate !== lease);
+        await writeLeases(workspaceId, leases);
+      }
+      return expired.map((lease) => lease.name);
+    });
   }
 
   /**
@@ -540,17 +551,21 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       const leases = await readLeases(workspaceId);
       const lease = leases.find((candidate) => candidate.name === name);
       if (!lease) throw refused(`This workspace has no machine called ${name}`);
-      const lxd = await lxdFor(lease);
-      await removeInstance(lxd, lease.instance);
-      for (const volume of lease.volumes) {
-        try {
-          await lxd.deleteVolume(lease.pool!, volume);
-        } catch (error) {
-          if (!isMissing(error)) throw error;
-        }
-      }
+      await destroy(await lxdFor(lease), lease);
       await writeLeases(workspaceId, leases.filter((candidate) => candidate !== lease));
     });
+  }
+
+  /** Deletes the machine's instance, with its snapshots, and its disks. */
+  async function destroy(lxd: Lxd, lease: MachineLease): Promise<void> {
+    await removeInstance(lxd, lease.instance);
+    for (const volume of lease.volumes) {
+      try {
+        await lxd.deleteVolume(lease.pool!, volume);
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+      }
+    }
   }
 
   return { acquire, list, waitFor, snapshot, restore, release, wake, usable, stopAll, expire, releaseAll, settings: deps.machineSettings, stored: readLeases };

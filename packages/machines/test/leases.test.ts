@@ -244,6 +244,35 @@ test("expired machines are released, and deleting a workspace releases all of th
   expect(lxd.instancesByName.size).toBe(0);
 });
 
+test("expiry releases only machines still expired, not one made again under the same name meanwhile", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "old" }, 5_000);
+  await leases.acquire("w1", { profile: "client", name: "reused" }, 5_000);
+  const deleting = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  const deleteInstance = lxd.deleteInstance.bind(lxd);
+  lxd.deleteInstance = async (name) => {
+    deleting.resolve();
+    await proceed.promise;
+    await deleteInstance(name);
+  };
+  const sweep = leases.expire("w1", Date.now() + client.lifetimeHours * 3_600_000 + 60_000);
+  await deleting.promise;
+  // While the sweep deletes the first, an Agent releases the second and makes a new one with its name.
+  const remade = leases.release("w1", "reused").catch(() => undefined).then(() => leases.acquire("w1", { profile: "client", name: "reused" }, 5_000));
+  proceed.resolve();
+  expect(await sweep).toEqual(["old", "reused"]);
+  expect((await remade).state).toBe("ready");
+  expect((await leases.list("w1")).map((machine) => [machine.name, machine.state])).toEqual([["reused", "ready"]]);
+  lxd.deleteInstance = deleteInstance;
+
+  // One that's booting waits for the next sweep.
+  lxd.probesUntilBooted = Number.POSITIVE_INFINITY;
+  await leases.acquire("w1", { profile: "client", name: "booting" }, 10);
+  expect(await leases.expire("w1", Number.POSITIVE_INFINITY)).toEqual(["reused"]);
+  await leases.release("w1", "booting");
+});
+
 test("a workspace being deleted gets no new machines, and ones already being acquired are released too", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "client", name: "first" }, 5_000);
