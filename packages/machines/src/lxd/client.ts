@@ -75,10 +75,19 @@ const instanceSchema = Type.Object({
   devices: Type.Record(Type.String(), Type.Record(Type.String(), Type.String())),
 });
 export type LxdInstance = Static<typeof instanceSchema>;
+export interface LxdInstanceDetails { snapshots: string[]; addresses: string[] }
 const instanceResponse = syncResponse(instanceSchema);
 const instancesResponse = syncResponse(Type.Array(instanceSchema));
 const profileResponse = syncResponse(Type.Object({ devices: Type.Record(Type.String(), Type.Record(Type.String(), Type.String())) }));
-const instanceSnapshotsResponse = syncResponse(Type.Object({ snapshots: Type.Union([Type.Array(Type.Object({ name: Type.String() })), Type.Null()]) }));
+const instanceNetwork = Type.Record(Type.String(), Type.Object({
+  /** The device's host side; empty for interfaces the instance made itself, like docker0. */
+  host_name: Type.String(),
+  addresses: Type.Union([Type.Array(Type.Object({ family: Type.String(), address: Type.String(), scope: Type.String() })), Type.Null()]),
+}));
+const instanceDetailsResponse = syncResponse(Type.Object({
+  snapshots: Type.Union([Type.Array(Type.Object({ name: Type.String() })), Type.Null()]),
+  state: Type.Object({ network: Type.Union([instanceNetwork, Type.Null()]) }),
+}));
 const execStarted = asyncResponse(Type.Object({ fds: Type.Object({ "0": Type.String(), "1": Type.String(), "2": Type.String(), control: Type.String() }) }));
 // A failed exec reports no exit status.
 const execFinished = finishedOperation(Type.Union([Type.Object({ return: Type.Optional(Type.Number()) }), Type.Null()]));
@@ -223,13 +232,22 @@ export class LxdClient extends LxdServerClient {
   }
 
   /**
+   * The instance's snapshots, and while it runs, the addresses its LXD network devices have, IPv4 first.
    * LXD (5.21 and 6.9) refuses restricted certificates on the snapshot endpoints themselves
    * ("No entitlements can be granted against entities of type instance_snapshot"),
    * so snapshots are listed through their instance and last until it is deleted.
    */
+  async details(instance: string): Promise<LxdInstanceDetails> {
+    const { metadata } = await this.get(instanceDetailsResponse, `/1.0/instances/${name(instance)}`, { recursion: "1" });
+    const addresses = Object.values(metadata.state.network ?? {})
+      .filter(device => device.host_name)
+      .flatMap(device => (device.addresses ?? []).filter(address => address.scope === "global"))
+      .sort((a, b) => Number(a.family !== "inet") - Number(b.family !== "inet"));
+    return { snapshots: (metadata.snapshots ?? []).map(snapshot => snapshot.name), addresses: addresses.map(address => address.address) };
+  }
+
   async snapshots(instance: string): Promise<string[]> {
-    const { metadata } = await this.get(instanceSnapshotsResponse, `/1.0/instances/${name(instance)}`, { recursion: "1" });
-    return (metadata.snapshots ?? []).map(snapshot => snapshot.name);
+    return (await this.details(instance)).snapshots;
   }
 
   async createSnapshot(instance: string, snapshot: string): Promise<void> {
