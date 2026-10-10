@@ -8,11 +8,13 @@ import { createWorkspaceTerminal } from "@agents-in-the-cloud/workspace-terminal
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { MachineView } from "./leases.ts";
-import { machineBootWaitMs, machineLeases, templateMachineSettings } from "./runtime.ts";
+import { machineLeases, templateMachineSettings } from "./runtime.ts";
 
 const reference = { type: "machines" } as const;
 const referenceSchema = Type.Object({ type: Type.Literal("machines") });
 const acquireSchema = Type.Object({ profile: Type.String(), name: Type.Optional(Type.String()) }, { additionalProperties: false });
+/** The web server drops a request that sends nothing for 255 seconds, so creating a machine answers before then. */
+const acquireAnswerMs = 4 * 60_000;
 
 const states = {
   creating: { label: "Being created", dot: "running" },
@@ -113,7 +115,7 @@ export const machineRoutes: WorkspaceModuleRouteHandler = {
       if (request.method === "POST") {
         const body: JsonObject = await readJsonObject(request);
         if (!Value.Check(acquireSchema, body)) throw invalidArguments("A machine request needs a profile, and may name the machine");
-        return jsonResponse({ machine: await machineLeases.acquire(workspaceId, body, machineBootWaitMs, request.signal) });
+        return jsonResponse({ machine: await machineLeases.acquire(workspaceId, body, acquireAnswerMs, request.signal) });
       }
     }
     if ((params = matchRoute(url, /^\/workspaces\/([^/]+)\/machines\/([^/]+)\/release$/)) && request.method === "POST") {
@@ -153,7 +155,7 @@ export const machinesOpenApiPaths = {
     get: { summary: "List a workspace's test machines, the profiles it may create them from, and how many it may hold", parameters: [workspaceIdParameter], responses: jsonResult("Machines with name, profile, type, image, state, expiry and snapshots") },
     post: {
       summary: "Create a test machine for a workspace from one of its template's machine profiles",
-      description: "Waits up to 10 minutes for the machine to boot and returns its state; a machine still booting keeps booting. Needs an LXD server connected in Settings.",
+      description: "Waits up to 4 minutes for the machine to boot and returns its state. A machine still booting keeps booting; listing the workspace's machines shows when it's ready. Needs an LXD server connected in Settings.",
       parameters: [workspaceIdParameter],
       requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["profile"], properties: { profile: { type: "string" }, name: { type: "string", pattern: "^[a-z][a-z0-9-]{0,39}$" } }, additionalProperties: false } } } },
       responses: jsonResult("The machine"),

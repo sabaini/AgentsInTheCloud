@@ -6,8 +6,8 @@ import { createMachineLeases, type MachineSettings } from "./leases.ts";
 import { workspaceMachinePublicKey, workspaceMachinesDirectory } from "./machine-key.ts";
 import { createMachineTunnels } from "./tunnels.ts";
 
-/** How long a connection or tool call waits for a machine to boot. A first VM image download fits too. */
-export const machineBootWaitMs = 10 * 60_000;
+/** How long an ssh connection waits for its machine to boot. A first VM image download fits too. */
+const machineBootWaitMs = 10 * 60_000;
 
 export async function templateMachineSettings(workspaceTemplateId: string | undefined): Promise<MachineSettings> {
   if (!workspaceTemplateId) return { profiles: [], maxMachines: 0 };
