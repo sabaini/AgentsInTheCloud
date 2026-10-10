@@ -1,6 +1,7 @@
 /** Lease real machines on a real LXD server through a fresh project and restricted certificate:
  * a VM with extra disks reached with `ssh node-1` through its tunnel and the workspace key, snapshotted
- * and restored with its disks, and a container that is snapshotted and restored too. Needs `lxc` with admin access to the server.
+ * and restored with its disks, and a container that is snapshotted and restored too, alone and together with the VM.
+ * Needs `lxc` with admin access to the server.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
  *   bun run test:machines [--remote <lxc-remote>] [--image <ubuntu-release>]
@@ -109,11 +110,11 @@ try {
   await step("snapshot, change and restore the VM, its extra disks included", async () => {
     const mark = (text: string) => run(`echo ${text} > /root/mark && printf ${text} | dd of=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_lxd_disk1 conv=fsync status=none`);
     await mark("before");
-    assert.deepEqual((await leases.snapshot(workspaceId, "node-1", "clean")).snapshots, ["clean"]);
+    assert.deepEqual((await leases.snapshot(workspaceId, ["node-1"], "clean"))[0]!.snapshots, ["clean"]);
     assert.equal((await lxd.instance(nodeInstance)).status, "Running");
     await mark("after-");
-    const restored = await leases.restore(workspaceId, "node-1", "clean", 10 * 60_000);
-    assert.equal(restored.state, "ready", JSON.stringify(restored));
+    const [restored] = await leases.restore(workspaceId, ["node-1"], "clean", 10 * 60_000);
+    assert.equal(restored!.state, "ready", JSON.stringify(restored));
     assert.equal(await run("cat /root/mark; head -c 6 /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_lxd_disk1"), "before\nbefore");
     assert.equal(await ssh(undefined, "hostname"), "node-1");
   });
@@ -122,12 +123,21 @@ try {
   assert.equal(probe.state, "ready", JSON.stringify(probe));
   await assert.rejects(leases.acquire(workspaceId, { profile: "probe" }, 1_000), /already has 2 of its 2 machines/);
   await step("snapshot, change, restore the container", async () => {
-    await leases.snapshot(workspaceId, "probe-1", "clean");
+    await leases.snapshot(workspaceId, ["probe-1"], "clean");
     assert.equal((await lxd.run(probeInstance, ["touch", "/root/experiment"])).exitCode, 0);
-    const restored = await leases.restore(workspaceId, "probe-1", "clean", 5 * 60_000);
-    assert.equal(restored.state, "ready", JSON.stringify(restored));
-    assert.deepEqual(restored.snapshots, ["clean"]);
+    const [restored] = await leases.restore(workspaceId, ["probe-1"], "clean", 5 * 60_000);
+    assert.equal(restored!.state, "ready", JSON.stringify(restored));
+    assert.deepEqual(restored!.snapshots, ["clean"]);
     assert.equal((await lxd.run(probeInstance, ["test", "-e", "/root/experiment"])).exitCode, 1);
+  });
+
+  await step("snapshot the VM and the container together, change both, and restore them together", async () => {
+    await leases.snapshot(workspaceId, ["node-1", "probe-1"], "pair");
+    assert.deepEqual(await Promise.all([nodeInstance, probeInstance].map(async (instance) => (await lxd.instance(instance)).status)), ["Running", "Running"]);
+    for (const instance of [nodeInstance, probeInstance]) assert.equal((await lxd.run(instance, ["touch", "/root/experiment"])).exitCode, 0);
+    const restored = await leases.restore(workspaceId, ["node-1", "probe-1"], "pair", 10 * 60_000);
+    assert.deepEqual(restored.map((machine) => machine.state), ["ready", "ready"], JSON.stringify(restored));
+    for (const instance of [nodeInstance, probeInstance]) assert.equal((await lxd.run(instance, ["test", "-e", "/root/experiment"])).exitCode, 1);
   });
 
   await step("release both, with their disks", async () => {

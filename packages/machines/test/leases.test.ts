@@ -132,18 +132,18 @@ test("after a restart, machines that were booting carry on and ones never create
 test("snapshots restore a machine and wait for it to come back", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await expect(leases.snapshot("w1", "node-1", "clean slate")).rejects.toThrow("Snapshot names");
-  expect((await leases.snapshot("w1", "node-1", "clean")).snapshots).toEqual(["clean"]);
+  await expect(leases.snapshot("w1", ["node-1"], "clean slate")).rejects.toThrow("Snapshot names");
+  expect((await leases.snapshot("w1", ["node-1"], "clean"))[0]!.snapshots).toEqual(["clean"]);
   const instance = lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!;
   instance.status = "Frozen";
   expect((await leases.list("w1"))[0]!.state).toBe("paused");
   instance.status = "Stopped";
   expect((await leases.list("w1"))[0]!.state).toBe("stopped");
   // Booting again, it still has its snapshots.
-  expect(await leases.restore("w1", "node-1", "clean", 0)).toMatchObject({ state: "starting", snapshots: ["clean"] });
+  expect(await leases.restore("w1", ["node-1"], "clean", 0)).toMatchObject([{ state: "starting", snapshots: ["clean"] }]);
   expect(await leases.waitFor("w1", "node-1", 5_000)).toMatchObject({ state: "ready", snapshots: ["clean"] });
   expect(instance.status).toBe("Running");
-  await expect(leases.restore("w1", "node-1", "missing", 5_000)).rejects.toThrow("node-1 has no snapshot called missing");
+  await expect(leases.restore("w1", ["node-1"], "missing", 5_000)).rejects.toThrow("node-1 has no snapshot called missing");
   expect(instance.status).toBe("Running");
 });
 
@@ -154,15 +154,16 @@ test("a snapshot has what the machine has written and its extra disks too, saved
   await leases.acquire("w1", { profile: "node" }, 5_000);
   const disks = [1, 2, 3].map((n) => `${instance}-disk${n}`);
   shown = [];
-  await leases.snapshot("w1", "node-1", "clean");
-  expect(lxd.log).toEqual([`run sync in ${instance} while Running`, ...disks.map((disk) => `snapshot ${disk} clean while Frozen`), `snapshot ${instance} clean while Frozen`]);
+  lxd.log = [];
+  await leases.snapshot("w1", ["node-1"], "clean");
+  expect(lxd.log).toEqual([`run sync in ${instance} while Running`, `freeze ${instance}`, ...disks.map((disk) => `snapshot ${disk} clean while Frozen`), `snapshot ${instance} clean while Frozen`, `unfreeze ${instance}`]);
   // The Machines view shows it paused, then running again.
   expect(shown).toEqual(["Frozen", "Running"]);
   expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
 
   lxd.log = [];
-  expect((await leases.restore("w1", "node-1", "clean", 5_000)).state).toBe("ready");
-  expect(lxd.log).toEqual([...disks.map((disk) => `restore ${disk} clean while Stopped`), `restore ${instance} clean while Stopped`]);
+  expect((await leases.restore("w1", ["node-1"], "clean", 5_000))[0]!.state).toBe("ready");
+  expect(lxd.log).toEqual([`stop ${instance}`, ...disks.map((disk) => `restore ${disk} clean while Stopped`), `restore ${instance} clean while Stopped`, `start ${instance}`]);
   expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
 
   // Releasing takes the disks' snapshots along with them.
@@ -170,38 +171,63 @@ test("a snapshot has what the machine has written and its extra disks too, saved
   expect(lxd.volumeSnapshots.size).toBe(0);
 });
 
+test("machines snapshotted together pause together, and restored together all stop before any is restored", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
+  await leases.acquire("w1", { profile: "client", name: "b" }, 5_000);
+  const [a, b] = ["a", "b"].map((name) => machineInstanceName("w1", name));
+  lxd.log = [];
+  expect((await leases.snapshot("w1", ["a", "b"], "formed")).map((machine) => machine.snapshots)).toEqual([["formed"], ["formed"]]);
+  expect(lxd.log).toEqual([`run sync in ${a} while Running`, `run sync in ${b} while Running`, `freeze ${a}`, `freeze ${b}`, `snapshot ${a} formed while Frozen`, `snapshot ${b} formed while Frozen`, `unfreeze ${a}`, `unfreeze ${b}`]);
+  await expect(leases.snapshot("w1", ["a", "b"], "formed")).rejects.toThrow("a already has a snapshot called formed");
+  await expect(leases.snapshot("w1", ["a", "a"], "again")).rejects.toThrow("Name each machine once");
+
+  // A single machine without extra disks has nothing to keep in step, so it doesn't pause.
+  lxd.log = [];
+  await leases.snapshot("w1", ["a"], "alone");
+  expect(lxd.log).toEqual([`run sync in ${a} while Running`, `snapshot ${a} alone while Running`]);
+
+  lxd.log = [];
+  expect((await leases.restore("w1", ["a", "b"], "formed", 5_000)).map((machine) => machine.state)).toEqual(["ready", "ready"]);
+  expect(lxd.log).toEqual([`stop ${a}`, `stop ${b}`, `restore ${a} formed while Stopped`, `restore ${b} formed while Stopped`, `start ${a}`, `start ${b}`]);
+  // All of them need the snapshot before any is touched.
+  lxd.log = [];
+  await expect(leases.restore("w1", ["a", "b"], "alone", 5_000)).rejects.toThrow("b has no snapshot called alone");
+  expect(lxd.log).toEqual([]);
+});
+
 test("a machine whose restore doesn't finish stays stopped until one does", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await leases.snapshot("w1", "node-1", "clean");
+  await leases.snapshot("w1", ["node-1"], "clean");
   const restoreVolume = lxd.restoreVolumeSnapshot.bind(lxd);
   lxd.restoreVolumeSnapshot = async (pool, volume, snapshot) => {
     if (volume.endsWith("-disk2")) throw new LxdRequestError(500, "No space left on device");
     await restoreVolume(pool, volume, snapshot);
   };
-  await expect(leases.restore("w1", "node-1", "clean", 5_000)).rejects.toThrow("No space left on device");
+  await expect(leases.restore("w1", ["node-1"], "clean", 5_000)).rejects.toThrow("No space left on device");
   expect(await leases.list("w1")).toMatchObject([{ state: "interrupted", error: "No space left on device" }]);
   // Neither ssh nor list_machines starts it with its first disk restored and the others not.
   await leases.usable("w1", "node-1", 5_000);
   await leases.wake("w1");
   expect(lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!.status).toBe("Stopped");
-  await expect(leases.snapshot("w1", "node-1", "later")).rejects.toThrow("isn't ready");
+  await expect(leases.snapshot("w1", ["node-1"], "later")).rejects.toThrow("isn't ready");
 
   // Nor after AgentsInTheCloud restarts in the middle of a restore.
   lxd.restoreVolumeSnapshot = () => new Promise(() => {});
-  void leases.restore("w1", "node-1", "clean", 5_000);
+  void leases.restore("w1", ["node-1"], "clean", 5_000);
   while ((await leases.list("w1"))[0]!.state !== "restoring") await Bun.sleep(1);
   const restarted = createMachineLeases(dependencies());
   expect(await restarted.list("w1")).toMatchObject([{ state: "interrupted", error: "AgentsInTheCloud restarted before it finished" }]);
   lxd.restoreVolumeSnapshot = restoreVolume;
-  expect((await restarted.restore("w1", "node-1", "clean", 5_000)).state).toBe("ready");
+  expect((await restarted.restore("w1", ["node-1"], "clean", 5_000))[0]!.state).toBe("ready");
 });
 
 test("a snapshot unfreezes the machine even when showing it paused fails", async () => {
   const instance = machineInstanceName("w1", "node-1");
   const leases = createMachineLeases(dependencies({ changed: async () => { if (lxd.instancesByName.get(instance)?.status === "Frozen") throw new Error("Couldn't write the workspace's ssh config"); } }));
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await expect(leases.snapshot("w1", "node-1", "clean")).rejects.toThrow("Couldn't write the workspace's ssh config");
+  await expect(leases.snapshot("w1", ["node-1"], "clean")).rejects.toThrow("Couldn't write the workspace's ssh config");
   expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
 });
 
@@ -314,7 +340,7 @@ test("machines stay with the LXD server they're on: with another connected, they
   expect((await leases.list("w1")).map((machine) => [machine.name, machine.state])).toEqual([["node-1", "disconnected"], ["client-1", "ready"]]);
   const elsewhere = "node-1 is on the LXD server at lxd.test:8443, in project agents-in-the-cloud, which isn't connected now";
   await expect(leases.release("w1", "node-1")).rejects.toThrow(elsewhere);
-  await expect(leases.snapshot("w1", "node-1", "clean")).rejects.toThrow(elsewhere);
+  await expect(leases.snapshot("w1", ["node-1"], "clean")).rejects.toThrow(elsewhere);
   await expect(leases.usable("w1", "node-1", 5_000)).rejects.toThrow(elsewhere);
   expect(await leases.expire("w1", Number.POSITIVE_INFINITY)).toEqual(["client-1"]);
   expect((await leases.stored("w1")).map((lease) => lease.name)).toEqual(["node-1"]);
