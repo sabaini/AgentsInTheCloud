@@ -267,6 +267,17 @@ describe("HTTP contracts", () => {
     expect(await revealWorkspaceTemplateSecrets(workspaceTemplate.id)).toEqual([]);
   });
 
+  test("a machine profile that doesn't exist is not found", async () => {
+    const { app, registry } = createTestApp();
+    await registry.seed([]);
+    const workspaceTemplate = (await addWorkspaceTemplate("https://github.com/org/machines.git")).workspaceTemplate;
+    const path = `/workspace-templates/${workspaceTemplate.id}/machine-profiles/missing`;
+    const updated = await app.fetch(postJson(path, { name: "node", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 24 }));
+    expect(updated.status).toBe(404);
+    expect(await updated.json()).toMatchObject({ error: { code: "workspace_template_machine_profile_not_found" } });
+    expect((await app.fetch(postJson(`${path}/delete`, {}))).status).toBe(404);
+  });
+
   test("project JSON routes return structured errors for malformed and invalid bodies", async () => {
     const { app, registry } = createTestApp();
     await registry.seed([]);
