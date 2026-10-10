@@ -12,10 +12,7 @@ let settings: MachineSettings;
 
 function dependencies(overrides: Partial<MachineLeaseDependencies> = {}): MachineLeaseDependencies {
   return {
-    lxd: async () => {
-      if (!connected) throw new Error("No LXD server is connected");
-      return lxd;
-    },
+    lxd: async () => connected ? lxd : undefined,
     machineSettings: async () => settings,
     publicKey: async (workspaceId) => `ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace ${workspaceId}`,
     directory: (workspaceId) => join(directory, workspaceId),
@@ -119,7 +116,7 @@ test("releasing a booting machine stops waiting for it and deletes it with its d
 });
 
 test("after a restart, machines that were booting carry on and ones never created are marked failed", async () => {
-  const lease = (name: string, status: string) => ({ name, instance: machineInstanceName("w1", name), profile: { name: "client", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status, hostKeys: [] });
+  const lease = (name: string, status: string) => ({ name, location: lxd.location, instance: machineInstanceName("w1", name), profile: { name: "client", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status, hostKeys: [] });
   await mkdir(join(directory, "w1"), { recursive: true });
   await writeFile(join(directory, "w1", "leases.json"), JSON.stringify({ leases: [lease("booting", "starting"), lease("lost", "creating")] }));
   await lxd.createInstance({ name: machineInstanceName("w1", "booting"), type: "container", source: { type: "image", alias: "24.04" } });
@@ -139,7 +136,27 @@ test("snapshots restore a machine and wait for it to come back", async () => {
   expect((await leases.list("w1"))[0]!.state).toBe("stopped");
   expect(await leases.restore("w1", "node-1", "clean", 5_000)).toMatchObject({ state: "ready", snapshots: ["clean"] });
   expect(instance.status).toBe("Running");
-  await expect(leases.restore("w1", "node-1", "missing", 5_000)).rejects.toThrow("Snapshot not found");
+  await expect(leases.restore("w1", "node-1", "missing", 5_000)).rejects.toThrow("node-1 has no snapshot called missing");
+  expect(instance.status).toBe("Running");
+});
+
+test("a snapshot has what the machine has written and its extra disks too, saved while it's paused, and restoring rolls them back with it", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  const instance = machineInstanceName("w1", "node-1");
+  const disks = [1, 2, 3].map((n) => `${instance}-disk${n}`);
+  await leases.snapshot("w1", "node-1", "clean");
+  expect(lxd.log).toEqual([`run sync in ${instance} while Running`, ...disks.map((disk) => `snapshot ${disk} clean while Frozen`), `snapshot ${instance} clean while Frozen`]);
+  expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
+
+  lxd.log = [];
+  expect((await leases.restore("w1", "node-1", "clean", 5_000)).state).toBe("ready");
+  expect(lxd.log).toEqual([...disks.map((disk) => `restore ${disk} clean while Stopped`), `restore ${instance} clean while Stopped`]);
+  expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
+
+  // Releasing takes the disks' snapshots along with them.
+  await leases.release("w1", "node-1");
+  expect(lxd.volumeSnapshots.size).toBe(0);
 });
 
 test("parking stops ready machines, and their next use starts them again", async () => {
@@ -178,7 +195,67 @@ test("expired machines are released, and deleting a workspace releases all of th
 
   await leases.acquire("w2", { profile: "node" }, 5_000);
   await leases.acquire("w2", { profile: "client" }, 5_000);
-  await leases.releaseAll("w2");
+  expect(await leases.releaseAll("w2")).toEqual([]);
   expect(await leases.stored("w2")).toEqual([]);
   expect(lxd.instancesByName.size).toBe(0);
+});
+
+test("a workspace being deleted gets no new machines, and ones already being acquired are released too", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "first" }, 5_000);
+  const deleting = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  const deleteInstance = lxd.deleteInstance.bind(lxd);
+  lxd.deleteInstance = async (name) => {
+    deleting.resolve();
+    await proceed.promise;
+    await deleteInstance(name);
+  };
+  const releasing = leases.releaseAll("w1");
+  await deleting.promise;
+  const late = leases.acquire("w1", { profile: "client", name: "late" }, 5_000);
+  proceed.resolve();
+  expect(await releasing).toEqual([]);
+  await expect(late).rejects.toThrow("being deleted");
+  expect(lxd.instancesByName.size).toBe(0);
+  expect(await leases.stored("w1")).toEqual([]);
+
+  // A deletion that fails leaves the workspace as it was.
+  lxd.deleteInstance = deleteInstance;
+  await leases.acquire("w2", { profile: "client" }, 5_000);
+  lxd.deleteInstance = async () => { throw new Error("LXD is busy"); };
+  await expect(leases.releaseAll("w2")).rejects.toThrow("LXD is busy");
+  lxd.deleteInstance = deleteInstance;
+  expect((await leases.acquire("w2", { profile: "client" }, 5_000)).name).toBe("client-2");
+});
+
+test("machines stay with the LXD server they're on: with another connected, they're out of reach and kept", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "node" }, 5_000);
+  const original = lxd;
+  lxd = new FakeLxd({ address: "other.test:8443", fingerprint: "b2", project: "agents-in-the-cloud" });
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+
+  expect((await leases.list("w1")).map((machine) => [machine.name, machine.state])).toEqual([["node-1", "disconnected"], ["client-1", "ready"]]);
+  const elsewhere = "node-1 is on the LXD server at lxd.test:8443, in project agents-in-the-cloud, which isn't connected now";
+  await expect(leases.release("w1", "node-1")).rejects.toThrow(elsewhere);
+  await expect(leases.snapshot("w1", "node-1", "clean")).rejects.toThrow(elsewhere);
+  await expect(leases.usable("w1", "node-1", 5_000)).rejects.toThrow(elsewhere);
+  expect(await leases.expire("w1", Number.POSITIVE_INFINITY)).toEqual(["client-1"]);
+  expect((await leases.stored("w1")).map((lease) => lease.name)).toEqual(["node-1"]);
+  expect(original.instancesByName.size).toBe(1);
+
+  // The same server keeps its certificate at a new address.
+  lxd = new FakeLxd({ ...original.location, address: "10.0.0.9:8443" });
+  lxd.instancesByName = original.instancesByName;
+  lxd.volumes = original.volumes;
+  expect((await leases.list("w1"))[0]!.state).toBe("ready");
+
+  // Deleting the workspace releases what's on the connected server and leaves the rest where it is.
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  lxd = new FakeLxd({ ...original.location, project: "elsewhere" });
+  await leases.acquire("w1", { profile: "client", name: "here" }, 5_000);
+  expect(await leases.releaseAll("w1")).toEqual(["node-1", "client-1"]);
+  expect(lxd.instancesByName.size).toBe(0);
+  expect(original.instancesByName.size).toBe(2);
 });

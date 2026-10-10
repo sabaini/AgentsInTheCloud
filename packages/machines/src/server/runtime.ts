@@ -1,4 +1,3 @@
-import { AgentsInTheCloudCoreError } from "@agents-in-the-cloud/core";
 import { getWorkspaceInit } from "@agents-in-the-cloud/workspace";
 import { getWorkspaceTemplateConfiguration, isGitWorkspaceTemplateInit, workspaceSshContainerDirectory, workspaceSshDirectory, workspaceTemplateIdFromInit } from "@agents-in-the-cloud/workspace-templates";
 import { LxdClient } from "../lxd/index.ts";
@@ -21,10 +20,9 @@ async function machineSettings(workspaceId: string): Promise<MachineSettings> {
   return await templateMachineSettings(isGitWorkspaceTemplateInit(init) ? workspaceTemplateIdFromInit(init) : undefined);
 }
 
-export async function connectedLxd(): Promise<LxdClient> {
+async function connectedLxd(): Promise<LxdClient | undefined> {
   const connection = await readLxdConnection();
-  if (!connection) throw new AgentsInTheCloudCoreError("machine_unavailable", "No LXD server is connected, so there are no machines. Ask the user to connect one in Settings, under Machines.");
-  return new LxdClient(connection);
+  return connection && new LxdClient(connection);
 }
 
 let showChange = (_workspaceId: string) => {};
@@ -35,7 +33,6 @@ export function onMachinesChanged(invalidateWorkspace: (workspaceId: string) => 
 }
 
 export const machineTunnels = createMachineTunnels({
-  lxd: connectedLxd,
   usable: (workspaceId, name) => machineLeases.usable(workspaceId, name, machineBootWaitMs),
   hostDirectory: workspaceSshDirectory,
   containerDirectory: workspaceSshContainerDirectory,

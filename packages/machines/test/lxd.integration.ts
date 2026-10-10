@@ -92,11 +92,21 @@ try {
     assert.equal((await lxd.run(instance, ["test", "-e", "/root/experiment"])).exitCode, 1);
   });
 
-  await step("create and delete a block volume", async () => {
+  await step("pause and resume", async () => {
+    await lxd.setInstanceState(instance, "freeze");
+    assert.equal((await lxd.instance(instance)).status, "Frozen");
+    await lxd.setInstanceState(instance, "unfreeze");
+    assert.equal((await lxd.instance(instance)).status, "Running");
+  });
+
+  await step("create a block volume, snapshot and restore it, and delete it with its snapshot", async () => {
     await lxd.createBlockVolume(pool, volume, "1GiB");
     cleanup.unshift(["storage", "volume", "delete", on(pool), volume, "--project", project]);
+    await lxd.createVolumeSnapshot(pool, volume, "clean");
+    await lxd.restoreVolumeSnapshot(pool, volume, "clean");
     await lxd.deleteVolume(pool, volume);
     cleanup.shift();
+    assert.equal(await lxc("storage", "volume", "list", on(pool), "--project", project, "type=custom", "-c", "n", "-f", "csv"), "");
   });
 
   await step("stop and delete the container", async () => {
