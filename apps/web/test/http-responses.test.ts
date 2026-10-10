@@ -19,3 +19,7 @@ test("a machine the workspace can't have right now is a conflict, not a server e
   expect(response.status).toBe(409);
   expect(await response.json()).toEqual({ error: { code: "machine_unavailable", message } });
 });
+
+test("a machine profile whose name the template already uses is a conflict", () => {
+  expect(problemJsonResponse(new AgentsInTheCloudCoreError("workspace_template_machine_profile_exists", "This template already has a profile called node")).status).toBe(409);
+});
