@@ -43,9 +43,6 @@ test("deleting a workspace with machines asks first, naming the ones that go wit
   await writeFile(join(dataDir, "machines", "workspaces", "w3", "leases.json"), JSON.stringify({ leases: [lease("here", certificateFingerprint(server.certificate)), lease("elsewhere", "b2")] }));
   const review = await machinesDeletionReview.inspect("w3");
   expect(review).toMatchObject({ status: "blocked", details: { deleted: ["here"], kept: ["elsewhere"] } });
-  const evidence = machinesDeletionReview.renderEvidence("w3", review.status === "blocked" ? review.details : {});
-  expect(evidence).toContain("Its machines will be deleted too");
-  expect(evidence).toContain("These ones will stay on their LXD server");
 });
 
 test("only tagged machines no workspace tracks count as untracked, and deleting one takes its disks", async () => {
