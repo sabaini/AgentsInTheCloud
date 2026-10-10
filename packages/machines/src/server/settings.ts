@@ -3,8 +3,8 @@ import { buttonHtml } from "@agents-in-the-cloud/design-system/button";
 import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/destructive-confirmation";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type SettingsContribution } from "@agents-in-the-cloud/shared";
-import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
-import { forgetLxdConnection, readLxdConnection, saveLxdConnection } from "./connection.ts";
+import { createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
+import { disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
 import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
 
 const sectionId = "settings-sec-machines";
@@ -123,19 +123,6 @@ async function deleteUntracked(request: Request): Promise<string> {
   return await renderMachinesSettings();
 }
 
-async function disconnect(): Promise<string> {
-  const connection = await readLxdConnection();
-  if (!connection) return await renderMachinesSettings();
-  let message = "";
-  try {
-    await new LxdServerClient(connection).removeOwnCertificate();
-  } catch (error) {
-    message = `AgentsInTheCloud forgot this server but couldn't remove its certificate there (${errorMessage(error)}). To remove it yourself, run lxc config trust remove ${certificateFingerprint(connection.credentials.certificate)} on the server.`;
-  }
-  await forgetLxdConnection();
-  return await renderMachinesSettings(message);
-}
-
 export const machinesSettingsContribution: SettingsContribution = {
   id: "machines",
   label: "Machines",
@@ -144,7 +131,7 @@ export const machinesSettingsContribution: SettingsContribution = {
   async handleAction({ request, url }) {
     if (request.method !== "POST") return undefined;
     if (url.pathname === connectPath) return turboStreamResponse(turboStream("replace", sectionId, await connect(request)));
-    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await disconnect()));
+    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await renderMachinesSettings(await disconnectLxd())));
     if (url.pathname === deleteUntrackedPath) return turboStreamResponse(turboStream("replace", sectionId, await deleteUntracked(request)));
     return undefined;
   },
