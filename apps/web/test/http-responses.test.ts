@@ -12,3 +12,10 @@ test("invalid terminal cwd returns a client validation response", async () => {
 test("terminal creation failures remain server errors", () => {
   expect(problemJsonResponse(new AgentsInTheCloudCoreError("terminal_create_failed", "creation failed")).status).toBe(500);
 });
+
+test("a machine the workspace can't have right now is a conflict, not a server error", async () => {
+  const message = "This workspace already has 2 of its 2 machines. Release one first.";
+  const response = problemJsonResponse(new AgentsInTheCloudCoreError("machine_unavailable", message));
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: { code: "machine_unavailable", message } });
+});
