@@ -9,9 +9,8 @@ import type { MachineLease } from "./leases.ts";
 export type MachineTunnelLxd = Pick<LxdClient, "exec">;
 
 export interface MachineTunnelDependencies {
-  lxd(): Promise<MachineTunnelLxd>;
-  /** Waits until the machine can take a connection, starting it if it's stopped. */
-  usable(workspaceId: string, name: string): Promise<void>;
+  /** Waits until the machine can take a connection, starting it if it's stopped, and returns the LXD project it's in. */
+  usable(workspaceId: string, name: string): Promise<MachineTunnelLxd>;
   /** The workspace's SSH directory on this host. */
   hostDirectory(workspaceId: string): string;
   /** The same directory inside the workspace container. */
@@ -54,8 +53,7 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
     // Reads and writes report their own failures, such as ssh exiting mid-reply; without a listener the same error would crash the process.
     client.on("error", () => {});
     try {
-      await deps.usable(workspaceId, lease.name);
-      const process = await (await deps.lxd()).exec(instance, sshCommand);
+      const process = await (await deps.usable(workspaceId, lease.name)).exec(instance, sshCommand);
       const toMachine = async () => {
         try {
           // Iterating would otherwise destroy the socket once the client stops sending, cutting off the reply.
@@ -65,7 +63,14 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
         }
       };
       const toClient = async () => {
-        for await (const chunk of process.stdout) await write(client, chunk);
+        try {
+          for await (const chunk of process.stdout) await write(client, chunk);
+        } catch (error) {
+          // ssh going away mid-reply is fine. Losing the machine's side isn't, and without an end ssh would wait for the rest of the reply.
+          if (client.destroyed) return;
+          client.destroy();
+          throw error;
+        }
         client.end();
       };
       const errors = async () => {
@@ -73,7 +78,8 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
         for await (const chunk of process.stderr) stderr += chunk.toString("utf8");
         return stderr.trim();
       };
-      const [, , stderr, exited] = await Promise.allSettled([toMachine(), toClient(), errors(), process.exited]);
+      const [, forwarded, stderr, exited] = await Promise.allSettled([toMachine(), toClient(), errors(), process.exited]);
+      if (forwarded.status === "rejected") throw forwarded.reason;
       if (exited.status === "rejected") throw exited.reason;
       if (exited.value !== 0) console.error(`[machines] SSH relay to ${instance} ended with status ${exited.value}${stderr.status === "fulfilled" && stderr.value ? `: ${stderr.value}` : ""}`);
     } catch (error) {

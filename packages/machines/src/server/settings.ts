@@ -65,7 +65,7 @@ function renderUntracked(machines: LxdInstance[]): string {
   return `<div class="machines-untracked"><p>These machines don’t belong to a workspace anymore. Delete them, with their disks and snapshots, when you no longer need them.</p><div class="managed-list">${rows}</div></div>`;
 }
 
-async function renderConnection(connection: LxdConnection): Promise<string> {
+async function renderConnection(connection: LxdConnection, message: string): Promise<string> {
   const disconnect = `<form method="post" action="${disconnectPath}" data-turbo="true">${destructiveConfirmationHtml({
     id: "disconnect_lxd",
     trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Disconnect" } },
@@ -73,6 +73,7 @@ async function renderConnection(connection: LxdConnection): Promise<string> {
     cancelCaption: "Cancel",
   })}</form>`;
   const where = `${connection.project} project at ${connection.server.address}`;
+  const notice = message ? `<p class="settings-error">${escapeHtml(message)}</p>` : "";
   const lxd = new LxdServerClient(connection);
   // A server behind a dropped route would otherwise keep Settings loading for minutes.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -81,10 +82,10 @@ async function renderConnection(connection: LxdConnection): Promise<string> {
     const [server, config, untracked] = await Promise.race([Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]), deadline]);
     const limits = limitLabels.flatMap(([key, label]) => config[key] ? [label(config[key])] : []);
     return row(`LXD on ${server.name}`, `<div class="managed-list__description">${escapeHtml(`${where} · LXD ${server.version}`)}</div>
-      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>`, disconnect) + renderUntracked(untracked);
+      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>`, disconnect) + notice + renderUntracked(untracked);
   } catch (error) {
     return row("LXD", `<div class="managed-list__description">${escapeHtml(where)}</div>
-      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can't reach it right now: ${errorMessage(error)}`)}</div>`, disconnect);
+      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can't reach it right now: ${errorMessage(error)}`)}</div>`, disconnect) + notice;
   } finally {
     clearTimeout(timer);
   }
@@ -92,7 +93,7 @@ async function renderConnection(connection: LxdConnection): Promise<string> {
 
 async function renderMachinesSettings(message = ""): Promise<string> {
   const connection = await readLxdConnection();
-  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${connection ? await renderConnection(connection) : renderConnectForm(message)}</section>`;
+  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${connection ? await renderConnection(connection, message) : renderConnectForm(message)}</section>`;
 }
 
 async function connect(request: Request): Promise<string> {
@@ -112,7 +113,13 @@ async function connect(request: Request): Promise<string> {
 
 async function deleteUntracked(request: Request): Promise<string> {
   const connection = await readLxdConnection();
-  if (connection) await deleteUntrackedMachine(new LxdClient(connection), String((await request.formData()).get("name") ?? ""));
+  if (!connection) return await renderMachinesSettings();
+  try {
+    await deleteUntrackedMachine(new LxdClient(connection), String((await request.formData()).get("name") ?? ""));
+  } catch (error) {
+    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(error.message);
+    throw error;
+  }
   return await renderMachinesSettings();
 }
 

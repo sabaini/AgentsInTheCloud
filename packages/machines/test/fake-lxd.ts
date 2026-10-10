@@ -1,5 +1,5 @@
 import type { WorkspaceTemplateMachineProfile } from "@agents-in-the-cloud/workspace-templates";
-import { LxdRequestError, type LxdInstance, type LxdInstancesPost } from "../src/lxd/index.ts";
+import { LxdRequestError, type LxdInstance, type LxdInstancesPost, type LxdLocation } from "../src/lxd/index.ts";
 import type { MachineLxd } from "../src/server/leases.ts";
 
 type LxdDevices = Record<string, Record<string, string>>;
@@ -9,6 +9,9 @@ interface FakeInstance extends LxdInstance { post: LxdInstancesPost; snapshots: 
 export class FakeLxd implements MachineLxd {
   instancesByName = new Map<string, FakeInstance>();
   volumes = new Map<string, string>();
+  volumeSnapshots = new Map<string, string[]>();
+  /** Snapshots and restores, with the state of the instance they're for at the time. */
+  log: string[] = [];
   profiles = new Map<string, LxdDevices>([
     ["default", { root: { type: "disk", path: "/", pool: "default" }, eth0: { type: "nic", network: "lxdbr0" } }],
     ["ceph-node", { root: { type: "disk", path: "/", pool: "fast" } }],
@@ -16,6 +19,8 @@ export class FakeLxd implements MachineLxd {
   probesUntilBooted = 3;
   hostKeys = new Map([["/etc/ssh/ssh_host_ed25519_key.pub", "ssh-ed25519 AAAAhost root@node\n"]]);
   failCreate?: string;
+
+  constructor(readonly location: LxdLocation = { address: "lxd.test:8443", fingerprint: "a1", project: "agents-in-the-cloud" }) {}
 
   private existing(name: string): FakeInstance {
     const instance = this.instancesByName.get(name);
@@ -33,12 +38,29 @@ export class FakeLxd implements MachineLxd {
   async createBlockVolume(pool: string, volume: string, size: string) { this.volumes.set(`${pool}/${volume}`, size); }
   async deleteVolume(pool: string, volume: string) {
     if (!this.volumes.delete(`${pool}/${volume}`)) throw new LxdRequestError(404, "Storage volume not found");
+    this.volumeSnapshots.delete(`${pool}/${volume}`);
+  }
+  private usedBy(pool: string, volume: string): FakeInstance | undefined {
+    return [...this.instancesByName.values()].find((instance) => Object.values(instance.devices).some((device) => device.pool === pool && device.source === volume));
+  }
+  async createVolumeSnapshot(pool: string, volume: string, snapshot: string) {
+    if (!this.volumes.has(`${pool}/${volume}`)) throw new LxdRequestError(404, "Storage volume not found");
+    this.volumeSnapshots.set(`${pool}/${volume}`, [...this.volumeSnapshots.get(`${pool}/${volume}`) ?? [], snapshot]);
+    this.log.push(`snapshot ${volume} ${snapshot} while ${this.usedBy(pool, volume)?.status}`);
+  }
+  async restoreVolumeSnapshot(pool: string, volume: string, snapshot: string) {
+    if (!this.volumeSnapshots.get(`${pool}/${volume}`)?.includes(snapshot)) throw new LxdRequestError(404, "Storage volume snapshot not found");
+    const user = this.usedBy(pool, volume);
+    if (user && user.status !== "Stopped") throw new LxdRequestError(400, "Cannot restore custom volume used by running instances");
+    this.log.push(`restore ${volume} ${snapshot} while ${user?.status}`);
   }
   async createInstance(post: LxdInstancesPost) {
     if (this.failCreate) throw new LxdRequestError(400, this.failCreate);
     this.instancesByName.set(post.name, { name: post.name, type: post.type, status: "Running", config: post.config ?? {}, devices: post.devices ?? {}, post, snapshots: [], probesUntilBooted: this.probesUntilBooted, cloudInitReadsLeft: 0, files: new Map(this.hostKeys) });
   }
-  async setInstanceState(name: string, action: "start" | "stop" | "restart") { this.existing(name).status = action === "stop" ? "Stopped" : "Running"; }
+  async setInstanceState(name: string, action: "start" | "stop" | "restart" | "freeze" | "unfreeze") {
+    this.existing(name).status = action === "stop" ? "Stopped" : action === "freeze" ? "Frozen" : "Running";
+  }
   async deleteInstance(name: string) {
     if (this.existing(name).status !== "Stopped") throw new LxdRequestError(400, "Instance is running");
     this.instancesByName.delete(name);
@@ -57,11 +79,21 @@ export class FakeLxd implements MachineLxd {
     const file = instance.files.get(path);
     return file === undefined ? undefined : Buffer.from(file);
   }
+  async run(name: string, command: string[]) {
+    const instance = this.existing(name);
+    this.log.push(`run ${command.join(" ")} in ${name} while ${instance.status}`);
+    return { exitCode: 0, stdout: Buffer.alloc(0), stderr: "" };
+  }
   async snapshots(name: string) { return this.existing(name).snapshots; }
-  async createSnapshot(name: string, snapshot: string) { this.existing(name).snapshots.push(snapshot); }
+  async createSnapshot(name: string, snapshot: string) {
+    const instance = this.existing(name);
+    instance.snapshots.push(snapshot);
+    this.log.push(`snapshot ${name} ${snapshot} while ${instance.status}`);
+  }
   async restoreSnapshot(name: string, snapshot: string) {
     const instance = this.existing(name);
     if (!instance.snapshots.includes(snapshot)) throw new LxdRequestError(404, "Snapshot not found");
+    this.log.push(`restore ${name} ${snapshot} while ${instance.status}`);
     instance.probesUntilBooted = 2;
   }
 }

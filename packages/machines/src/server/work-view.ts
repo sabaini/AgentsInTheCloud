@@ -21,6 +21,7 @@ const states = {
   stopped: { label: "Stopped, starts again when it’s next used", dot: "" },
   failed: { label: "Couldn’t be set up", dot: "danger" },
   missing: { label: "Gone from the LXD server", dot: "warning" },
+  disconnected: { label: "On an LXD server that isn’t connected now", dot: "warning" },
 } satisfies Record<MachineView["state"], { label: string; dot: string }>;
 
 const errorTarget = (workspaceId: string) => domId("machines_view_error", workspaceId);

@@ -1,6 +1,6 @@
 /** Lease real machines on a real LXD server through a fresh project and restricted certificate:
- * a VM with extra disks reached with `ssh node-1` through its tunnel and the workspace key, and a
- * container that is snapshotted and restored. Needs `lxc` with admin access to the server.
+ * a VM with extra disks reached with `ssh node-1` through its tunnel and the workspace key, snapshotted
+ * and restored with its disks, and a container that is snapshotted and restored too. Needs `lxc` with admin access to the server.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
  *   bun run test:machines [--remote <lxc-remote>] [--image <ubuntu-release>]
@@ -54,7 +54,7 @@ try {
 
   // On this host, the workspace's SSH directory and the one its container would see are the same.
   const sshDirectory = join(directory, "ssh");
-  const tunnels = createMachineTunnels({ lxd: async () => lxd, usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
+  const tunnels = createMachineTunnels({ usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
   const leases = createMachineLeases({
     lxd: async () => lxd,
     machineSettings: async () => ({ profiles: [profile({ name: "node", diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
@@ -79,14 +79,14 @@ try {
     ...[1, 2].map((disk) => ["storage", "volume", "delete", on("default"), `${nodeInstance}-disk${disk}`, "--project", project]),
   );
 
+  const run = async (shell: string) => {
+    const result = await lxd.run(nodeInstance, ["sh", "-c", shell]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    return result.stdout.toString().trim();
+  };
   const node = await step(`acquire a VM from ubuntu:${options.image} with 2 and 3 GiB disks`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
   assert.equal(node.state, "ready", JSON.stringify(node));
   await step("its disks, hostname and authorized key are in place", async () => {
-    const run = async (shell: string) => {
-      const result = await lxd.run(nodeInstance, ["sh", "-c", shell]);
-      assert.equal(result.exitCode, 0, result.stderr);
-      return result.stdout.toString().trim();
-    };
     assert.deepEqual((await run("lsblk -dn -b -o SIZE,TYPE -e7 | awk '$2==\"disk\"{print $1}' | sort -n")).split("\n").map(Number).slice(0, 2), [2 * 1024 ** 3, 3 * 1024 ** 3]);
     assert.equal(await run("hostname"), "node-1");
     assert((await run("cat /home/ubuntu/.ssh/authorized_keys")).includes("aitc integration"));
@@ -103,6 +103,18 @@ try {
     assert.equal((await leases.list(workspaceId))[0]!.state, "stopped");
     assert.equal(await ssh(undefined, "hostname"), "node-1");
     assert.equal((await leases.list(workspaceId))[0]!.state, "ready");
+  });
+
+  await step("snapshot, change and restore the VM, its extra disks included", async () => {
+    const mark = (text: string) => run(`echo ${text} > /root/mark && printf ${text} | dd of=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_lxd_disk1 conv=fsync status=none`);
+    await mark("before");
+    assert.deepEqual((await leases.snapshot(workspaceId, "node-1", "clean")).snapshots, ["clean"]);
+    assert.equal((await lxd.instance(nodeInstance)).status, "Running");
+    await mark("after-");
+    const restored = await leases.restore(workspaceId, "node-1", "clean", 10 * 60_000);
+    assert.equal(restored.state, "ready", JSON.stringify(restored));
+    assert.equal(await run("cat /root/mark; head -c 6 /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_lxd_disk1"), "before\nbefore");
+    assert.equal(await ssh(undefined, "hostname"), "node-1");
   });
 
   const probe = await step("acquire a container", () => leases.acquire(workspaceId, { profile: "probe" }, 10 * 60_000));

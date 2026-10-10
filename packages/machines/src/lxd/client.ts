@@ -8,6 +8,21 @@ export interface LxdConnection extends LxdTlsIdentity {
   project: string;
 }
 
+/** A project on a server. The server is known by its certificate, which it keeps when its address changes or AITC connects to it again. */
+export interface LxdLocation {
+  address: string;
+  fingerprint: string;
+  project: string;
+}
+
+export function lxdLocation(connection: LxdConnection): LxdLocation {
+  return { address: connection.server.address, fingerprint: certificateFingerprint(connection.server.certificate), project: connection.project };
+}
+
+export function sameLxdLocation(a: LxdLocation, b: LxdLocation): boolean {
+  return a.fingerprint === b.fingerprint && a.project === b.project;
+}
+
 export class LxdRequestError extends AgentsInTheCloudCoreError {
   constructor(readonly status: number, message: string) {
     super("lxd_request_failed", message, { status });
@@ -26,7 +41,7 @@ export interface LxdInstancesPost {
   start?: boolean;
 }
 
-interface LxdStatePut { action: "start" | "stop" | "restart"; force: boolean; timeout: number }
+interface LxdStatePut { action: "start" | "stop" | "restart" | "freeze" | "unfreeze"; force: boolean; timeout: number }
 interface LxdSnapshotsPost { name: string }
 interface LxdRestorePut { restore: string }
 interface LxdVolumesPost { name: string; content_type: "block"; config: { size: string } }
@@ -158,8 +173,11 @@ export class LxdServerClient {
 
 /** One project on one LXD server, reached with AITC's restricted client certificate. */
 export class LxdClient extends LxdServerClient {
+  readonly location: LxdLocation;
+
   constructor(private readonly connection: LxdConnection) {
     super(connection);
+    this.location = lxdLocation(connection);
   }
 
   protected override url(path: string, query: Record<string, string> = {}): URL {
@@ -227,8 +245,19 @@ export class LxdClient extends LxdServerClient {
     await this.perform("POST", `/1.0/storage-pools/${name(pool)}/volumes/custom`, { name: volume, content_type: "block", config: { size } });
   }
 
+  /** Deletes the volume's snapshots too. */
   async deleteVolume(pool: string, volume: string): Promise<void> {
     await this.perform("DELETE", `/1.0/storage-pools/${name(pool)}/volumes/custom/${name(volume)}`);
+  }
+
+  /** A volume attached to an instance isn't part of the instance's snapshots, so it has snapshots of its own. */
+  async createVolumeSnapshot(pool: string, volume: string, snapshot: string): Promise<void> {
+    await this.perform("POST", `/1.0/storage-pools/${name(pool)}/volumes/custom/${name(volume)}/snapshots`, { name: snapshot });
+  }
+
+  /** LXD refuses while an instance using the volume is running. */
+  async restoreVolumeSnapshot(pool: string, volume: string, snapshot: string): Promise<void> {
+    await this.perform("PUT", `/1.0/storage-pools/${name(pool)}/volumes/custom/${name(volume)}`, { restore: snapshot });
   }
 
   /** Start a command with separate stdin, stdout and stderr streams; no terminal is allocated. Read both outputs. */

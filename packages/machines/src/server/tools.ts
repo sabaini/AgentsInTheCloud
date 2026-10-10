@@ -21,6 +21,7 @@ function describeMachine(machine: MachineView): string {
     case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
     case "failed": return `${machine.name} couldn't be set up: ${machine.error}. Release it with release_machine.`;
     case "missing": return `${machine.name} is gone from the LXD server. Release it with release_machine.`;
+    case "disconnected": return `${machine.name} is on an LXD server that isn't connected now: ${what}. It can be used or released once the user connects that server again in Settings, under Machines.`;
   }
 }
 
@@ -91,7 +92,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("snapshot_machine", (workspaceId) => defineWorkspaceTool({
       name: "snapshot_machine",
       label: "Snapshot Machine",
-      description: "Save a machine's disks as a named snapshot, to return to with restore_machine between experiments. Snapshots last until the machine is released.",
+      description: "Save a machine's disks, its extra ones included, as a named snapshot, to return to with restore_machine between experiments. A machine with extra disks pauses while they're saved. Snapshots last until the machine is released.",
       parameters: Type.Object({ name: machineName, snapshot: snapshotName }),
       execute: async (_toolCallId, params: { name: string; snapshot: string }) => {
         const machine = await leases.snapshot(workspaceId, params.name, params.snapshot);
