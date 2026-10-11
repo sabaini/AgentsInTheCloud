@@ -53,7 +53,7 @@ const bridged: WorkspaceTemplateMachineProfile = { ...profile, id: randomUUID(),
 
 try {
   const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
-  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
+  await lxc("project", "create", on(project), "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
   cleanup.unshift(["project", "delete", on(project)]);
   await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
   cleanup.unshift(["network", "acl", "delete", on(machineNetworkAcl), "--project", project]);

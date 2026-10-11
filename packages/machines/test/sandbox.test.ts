@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { lxdVersionKeepsSnapshots, projectSandbox } from "../src/server/sandbox.ts";
 
-const sandboxed = { restricted: "true", "restricted.snapshots": "allow", "features.images": "false", "features.profiles": "true", "features.networks": "true", "restricted.networks.uplinks": "UPLINK", "limits.instances": "20" };
+const sandboxed = { restricted: "true", "restricted.snapshots": "allow", "features.images": "true", "features.profiles": "true", "features.networks": "true", "restricted.networks.uplinks": "UPLINK", "limits.instances": "20" };
 
 test("the project the connect form suggests keeps machines sandboxed on its one uplink", () => {
   expect(projectSandbox(sandboxed)).toEqual({ uplink: "UPLINK", missing: [], unsafe: [] });
@@ -10,7 +10,7 @@ test("the project the connect form suggests keeps machines sandboxed on its one 
 
 test("each missing piece is named", () => {
   // As the connect form suggested before machines had networks of their own.
-  expect(projectSandbox({ "features.images": "false", "features.profiles": "false" })).toEqual({ missing: ["restricted=true", "restricted.snapshots=allow", "features.profiles=true", "features.networks=true", "restricted.networks.uplinks=UPLINK"], unsafe: [] });
+  expect(projectSandbox({ "features.images": "false", "features.profiles": "false" })).toEqual({ missing: ["restricted=true", "restricted.snapshots=allow", "features.images=true", "features.profiles=true", "features.networks=true", "restricted.networks.uplinks=UPLINK"], unsafe: [] });
   expect(projectSandbox({ ...sandboxed, "restricted.networks.uplinks": "UPLINK,lxdbr0" })).toEqual({ missing: ["restricted.networks.uplinks=UPLINK"], unsafe: [] });
 });
 

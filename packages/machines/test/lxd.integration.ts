@@ -42,7 +42,7 @@ try {
   // The pool the root disk uses: "default" on a plain LXD, "local" on MicroCloud.
   const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
   // As the connect form suggests.
-  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
+  await lxc("project", "create", on(project), "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
   cleanup.unshift(["project", "delete", on(project)]);
   await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
   const token = (await lxc("config", "trust", "add", ...(options.remote ? [on()] : []), "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;

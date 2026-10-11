@@ -71,6 +71,8 @@ export function projectSandbox(config: Record<string, string>): ProjectSandbox {
   const missing: string[] = [];
   if (config.restricted !== "true") missing.push("restricted=true");
   if (config["restricted.snapshots"] !== "allow") missing.push("restricted.snapshots=allow");
+  // With the default project's images, its certificate could change images other projects use.
+  if (config["features.images"] !== "true") missing.push("features.images=true");
   // LXD restricts only projects with profiles of their own.
   if (config["features.profiles"] !== "true") missing.push("features.profiles=true");
   if (config["features.networks"] !== "true") missing.push("features.networks=true");

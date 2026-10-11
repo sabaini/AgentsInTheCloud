@@ -101,7 +101,7 @@ try {
 
   await step(`connect AgentsInTheCloud to the ${project} project with a restricted token, as Settings asks`, async () => {
     const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
-    await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
+    await lxc("project", "create", on(project), "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
     kept.unshift(`lxc project delete ${on(project)}`);
     await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
     // AgentsInTheCloud keeps its ACL for the next machine.

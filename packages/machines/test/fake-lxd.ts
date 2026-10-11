@@ -17,7 +17,7 @@ export class FakeLxd implements MachineLxd {
     ["ceph-node", { root: { type: "disk", path: "/", pool: "fast" } }],
   ]);
   /** The project's config, sandboxed as the connect form suggests. */
-  projectSettings: Awaited<ReturnType<MachineLxd["projectConfig"]>> = { restricted: "true", "restricted.snapshots": "allow", "features.images": "false", "features.profiles": "true", "features.networks": "true", "restricted.networks.uplinks": "UPLINK" };
+  projectSettings: Awaited<ReturnType<MachineLxd["projectConfig"]>> = { restricted: "true", "restricted.snapshots": "allow", "features.images": "true", "features.profiles": "true", "features.networks": "true", "restricted.networks.uplinks": "UPLINK" };
   networks = new Map<string, Record<string, string>>();
   acls = new Map<string, Pick<LxdNetworkAclPut, "egress" | "ingress">>();
   probesUntilBooted = 3;
