@@ -14,7 +14,6 @@ import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdC
 const project = `aitc-it-${randomUUID().slice(0, 8)}`;
 // Unique like the project: LXD wants DNS names unique on the network across projects, kept failed runs included.
 const instance = `machine-${project.slice(-8)}`;
-const pool = "default";
 const volume = `${instance}-disk-1`;
 const { values: options } = parseArgs({ options: { remote: { type: "string" }, image: { type: "string", default: "24.04" } } });
 const alias = options.image;
@@ -38,6 +37,8 @@ async function step<T>(description: string, action: () => Promise<T>): Promise<T
 
 try {
   console.log(`LXD ${(await lxc("query", `${on()}/1.0`)).match(/"server_version": "([^"]+)"/)?.[1]}`);
+  // The pool the root disk uses: "default" on a plain LXD, "local" on MicroCloud.
+  const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
   await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=false");
   cleanup.unshift(["project", "delete", on(project)]);
   const token = (await lxc("config", "trust", "add", ...(options.remote ? [on()] : []), "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;

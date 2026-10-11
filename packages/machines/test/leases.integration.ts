@@ -75,10 +75,12 @@ try {
   };
   const nodeInstance = machineInstanceName(workspaceId, "node-1");
   const probeInstance = machineInstanceName(workspaceId, "probe-1");
+  // The extra disks go where the root disk does: "default" on a plain LXD, "local" on MicroCloud.
+  const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
   cleanup.unshift(
     ["delete", "--force", "--project", project, on(nodeInstance)],
     ["delete", "--force", "--project", project, on(probeInstance)],
-    ...[1, 2].map((disk) => ["storage", "volume", "delete", on("default"), `${nodeInstance}-disk${disk}`, "--project", project]),
+    ...[1, 2].map((disk) => ["storage", "volume", "delete", on(pool), `${nodeInstance}-disk${disk}`, "--project", project]),
   );
 
   const run = async (shell: string) => {
@@ -146,7 +148,7 @@ try {
     cleanup.splice(0, 4);
     assert.deepEqual(await leases.list(workspaceId), []);
     assert.equal(await lxc("list", "--project", project, on(), "-c", "n", "-f", "csv"), "");
-    assert.equal(await lxc("storage", "volume", "list", on("default"), "--project", project, "-c", "n", "-f", "csv"), "");
+    assert.equal(await lxc("storage", "volume", "list", on(pool), "--project", project, "type=custom", "-c", "n", "-f", "csv"), "");
     assert(!(await readFile(join(sshDirectory, "ssh_config.d", "machines.conf"), "utf8")).includes("Host node-1"));
     assert.deepEqual((await readdir(join(sshDirectory, "machines"))).filter((file) => file.endsWith(".sock")), []);
   });
