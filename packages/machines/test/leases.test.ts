@@ -48,13 +48,14 @@ test("a machine gets its disks in its root disk's pool, the workspace key, and w
     source: { alias: "24.04", server: "https://cloud-images.ubuntu.com/releases", protocol: "simplestreams" },
     profiles: ["default", "ceph-node"],
     devices: { disk1: { type: "disk", pool: "fast", source: `${instance.name}-disk1` } },
-    config: { "user.aitc.workspace": "w1", "user.aitc.lease": "node-1" },
+    config: { "user.aitc.workspace": "w1", "user.aitc.lease": "node-1", "migration.stateful": "false" },
   });
   expect(instance.config["cloud-init.vendor-data"]).toBe('#cloud-config\nhostname: "node-1"\nmanage_etc_hosts: true\nssh_authorized_keys:\n  - "ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace w1"\n');
   const stored = JSON.parse(await readFile(join(directory, "w1", "leases.json"), "utf8"));
   expect(stored.leases[0]).toMatchObject({ status: "ready", hostKeys: ["ssh-ed25519 AAAAhost"] });
 
   expect((await leases.acquire("w1", { profile: "client", name: "probe" }, 5_000)).name).toBe("probe");
+  expect(lxd.instancesByName.get(machineInstanceName("w1", "probe"))!.config).not.toHaveProperty(["migration.stateful"]);
   expect((await leases.acquire("w1", { profile: "node" }, 5_000)).name).toBe("node-2");
   expect((await leases.acquire("w2", { profile: "node" }, 5_000)).name).toBe("node-1");
 });

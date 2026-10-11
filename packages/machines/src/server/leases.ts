@@ -307,13 +307,16 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
         for (const [index, size] of sizes.entries()) await lxd.createBlockVolume(pool, volumes[index]!, `${size}GiB`);
         devices = Object.fromEntries(volumes.map((volume, index) => [`disk${index + 1}`, { type: "disk", pool, source: volume }]));
       }
+      const config: NonNullable<LxdInstancesPost["config"]> = { "user.aitc.workspace": workspaceId, "user.aitc.lease": name, "cloud-init.vendor-data": vendorData(name, await deps.publicKey(workspaceId)) };
+      // MicroCloud turns stateful migration on for every VM, and then refuses extra disks from local pools. Machines never move.
+      if (lease.profile.type === "virtual-machine") config["migration.stateful"] = "false";
       await lxd.createInstance({
         name: lease.instance,
         description: `AgentsInTheCloud machine ${name} for workspace ${workspaceId}`,
         type: lease.profile.type,
         source: machineImageSource(lease.profile.image),
         profiles: lease.profile.lxdProfiles,
-        config: { "user.aitc.workspace": workspaceId, "user.aitc.lease": name, "cloud-init.vendor-data": vendorData(name, await deps.publicKey(workspaceId)) },
+        config,
         devices,
         start: true,
       });
