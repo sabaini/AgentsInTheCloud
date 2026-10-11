@@ -217,7 +217,8 @@ test("a machine whose restore doesn't finish stays stopped until one does", asyn
   // Nor after AgentsInTheCloud restarts in the middle of a restore.
   lxd.restoreVolumeSnapshot = () => new Promise(() => {});
   void leases.restore("w1", ["node-1"], "clean", 5_000);
-  while ((await leases.list("w1"))[0]!.state !== "restoring") await Bun.sleep(1);
+  // Until the restore is recorded, which clears the last one's error, a restart would find only the last one.
+  while (JSON.parse(await readFile(join(directory, "w1", "leases.json"), "utf8")).leases[0].error) await Bun.sleep(1);
   const restarted = createMachineLeases(dependencies());
   expect(await restarted.list("w1")).toMatchObject([{ state: "interrupted", error: "AgentsInTheCloud restarted before it finished" }]);
   lxd.restoreVolumeSnapshot = restoreVolume;
