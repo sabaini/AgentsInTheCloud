@@ -34,9 +34,8 @@ function renderConnectForm(message: string): string {
   return row("LXD", `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
     <p>Give Agents their own test machines on a server with LXD 6.9 or later and OVN, like a MicroCloud, for work that needs real disks, its own kernel or several machines. On that server, run:</p>
     <pre class="settings-command">lxc project create ${suggestedProject} \\
-  -c features.images=false -c features.profiles=true \\
-  -c features.networks=true -c restricted=true \\
-  -c restricted.snapshots=allow \\
+  -c features.profiles=true -c features.networks=true \\
+  -c restricted=true -c restricted.snapshots=allow \\
   -c restricted.networks.uplinks=UPLINK
 lxc profile device add default root disk path=/ \\
   pool=local --project ${suggestedProject}
@@ -77,6 +76,7 @@ const notOnMicroCloud = "Not on a MicroCloud? Use your OVN uplink network and st
 function sandboxFixes(project: string, config: Record<string, string>) {
   const { missing, unsafe } = projectSandbox(config);
   const commands: string[] = [];
+  // One update, since a MicroCloud refuses any other change to a project without images of its own.
   if (missing.length) commands.push(`lxc project set ${project} ${missing.join(" ")}`);
   // Its own default profile starts out empty. LXD itself says when the project has to be emptied first.
   const ownProfiles = missing.includes("features.profiles=true");
