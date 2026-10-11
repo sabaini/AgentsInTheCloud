@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { lxdLocation, sameLxdLocation, type LxdInstance } from "../lxd/index.ts";
 import { readLxdConnection } from "./connection.ts";
-import { removeInstance, type MachineLxd } from "./leases.ts";
+import { removeInstance, removeUnusedNetwork, type MachineLxd } from "./leases.ts";
 import { workspaceMachinesDirectory, workspacesWithMachines } from "./machine-key.ts";
 import { machineLeases, machineTunnels } from "./runtime.ts";
 
@@ -48,7 +48,7 @@ export async function untrackedMachines(lxd: MachineLxd): Promise<LxdInstance[]>
   return (await lxd.instances()).filter((instance) => instance.config["user.aitc.workspace"] !== undefined && !tracked.has(instance.name));
 }
 
-/** Deletes an untracked machine and the extra disks AITC made for it. Never runs on its own. */
+/** Deletes an untracked machine, the extra disks AITC made for it, and its workspace's network once that's unused. Never runs on its own. */
 export async function deleteUntrackedMachine(lxd: MachineLxd, name: string): Promise<void> {
   const machine = (await untrackedMachines(lxd)).find((instance) => instance.name === name);
   if (!machine) throw new AgentsInTheCloudCoreError("machine_unavailable", `${name} isn't a machine AgentsInTheCloud has lost track of`);
@@ -63,6 +63,8 @@ export async function deleteUntrackedMachine(lxd: MachineLxd, name: string): Pro
       left.push({ pool: device.pool, volume: device.source, error });
     }
   }
+  const workspaceId = machine.config["user.aitc.workspace"]!;
+  await removeUnusedNetwork(lxd, workspaceId, await machineLeases.stored(workspaceId));
   if (!left.length) return;
   const commands = left.map(({ pool, volume }) => `lxc storage volume delete ${pool} ${volume} --project ${lxd.location.project}`);
   throw new AgentsInTheCloudCoreError("machine_unavailable", `${name} is deleted, but ${left.length === 1 ? "one of its disks isn’t" : "some of its disks aren’t"} (${errorMessage(left[0]!.error)}). To delete ${left.length === 1 ? "it" : "them"}, run ${commands.join(" and ")} on the LXD server.`);

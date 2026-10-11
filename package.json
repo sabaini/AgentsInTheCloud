@@ -29,6 +29,7 @@
     "test:lxd": "bun packages/machines/test/lxd.integration.ts",
     "test:machines": "bun packages/machines/test/leases.integration.ts",
     "test:machines:functional": "bun packages/machines/test/functional.integration.ts",
+    "test:machines:sandbox": "bun packages/machines/test/sandbox.integration.ts",
     "ci": "bun ci && bun run check && bun run test",
     "web": "bun run --cwd apps/web dev",
     "preview:redesign": "bun run scripts/run-redesign-preview.ts",

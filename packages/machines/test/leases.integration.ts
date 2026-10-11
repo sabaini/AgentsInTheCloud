@@ -1,10 +1,11 @@
-/** Lease real machines on a real LXD server through a fresh project and restricted certificate:
+/** Lease real machines on a real LXD server with OVN through a fresh sandboxed project and restricted certificate:
  * a VM with extra disks reached with `ssh node-1` through its tunnel and the workspace key, snapshotted
- * and restored with its disks, and a container that is snapshotted and restored too, alone and together with the VM.
- * Needs `lxc` with admin access to the server.
+ * and restored with its disks, and a container that the VM reaches by name on their workspace's network, and that is
+ * snapshotted and restored too, alone and together with the VM.
+ * Needs `lxc` with admin access to the server. `--uplink` is its OVN uplink network.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
- *   bun run test:machines [--remote <lxc-remote>] [--image <ubuntu-release>]
+ *   bun run test:machines [--remote <lxc-remote>] [--uplink UPLINK] [--image <ubuntu-release>]
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -13,14 +14,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { WorkspaceTemplateMachineProfile } from "@agents-in-the-cloud/workspace-templates";
-import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient } from "../src/lxd/index.ts";
+import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdClient, LxdRequestError } from "../src/lxd/index.ts";
 import { createMachineLeases, machineInstanceName } from "../src/server/leases.ts";
+import { machineNetworkAcl, workspaceNetworkName } from "../src/server/sandbox.ts";
 import { createMachineTunnels } from "../src/server/tunnels.ts";
 
 const project = `aitc-it-${randomUUID().slice(0, 8)}`;
 // Instance names come from it, and LXD wants their DNS names unique on the network across projects, kept failed runs included.
 const workspaceId = project;
-const { values: options } = parseArgs({ options: { remote: { type: "string" }, image: { type: "string", default: "24.04" } } });
+const { values: options } = parseArgs({ options: { remote: { type: "string" }, uplink: { type: "string", default: "UPLINK" }, image: { type: "string", default: "24.04" } } });
 const on = (name = "") => options.remote ? `${options.remote}:${name}` : name;
 const cleanup: string[][] = [];
 const directory = await mkdtemp(join(tmpdir(), "machines-leases-it-"));
@@ -43,8 +45,14 @@ async function step<T>(description: string, action: () => Promise<T>): Promise<T
 const profile = (values: Partial<WorkspaceTemplateMachineProfile>): WorkspaceTemplateMachineProfile => ({ id: randomUUID(), workspaceTemplateId: "t", name: "node", image: `ubuntu:${options.image}`, type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 1, createdAt: "", updatedAt: "", ...values });
 
 try {
-  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=false");
+  // The extra disks go where the root disk does: "default" on a plain LXD, "local" on MicroCloud.
+  const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
+  // As the connect form suggests.
+  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
   cleanup.unshift(["project", "delete", on(project)]);
+  await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
+  // AgentsInTheCloud keeps the ACL for the next machine.
+  cleanup.unshift(["network", "acl", "delete", on(machineNetworkAcl), "--project", project]);
   const token = (await lxc("config", "trust", "add", ...(options.remote ? [on()] : []), "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;
   const credentials = await createLxdClientCredentials(project);
   const { server } = await joinLxdServer(token, credentials);
@@ -75,12 +83,12 @@ try {
   };
   const nodeInstance = machineInstanceName(workspaceId, "node-1");
   const probeInstance = machineInstanceName(workspaceId, "probe-1");
-  // The extra disks go where the root disk does: "default" on a plain LXD, "local" on MicroCloud.
-  const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
+  const network = workspaceNetworkName(workspaceId);
   cleanup.unshift(
     ["delete", "--force", "--project", project, on(nodeInstance)],
     ["delete", "--force", "--project", project, on(probeInstance)],
     ...[1, 2].map((disk) => ["storage", "volume", "delete", on(pool), `${nodeInstance}-disk${disk}`, "--project", project]),
+    ["network", "delete", on(network), "--project", project],
   );
 
   const run = async (shell: string) => {
@@ -88,8 +96,9 @@ try {
     assert.equal(result.exitCode, 0, result.stderr);
     return result.stdout.toString().trim();
   };
-  const node = await step(`acquire a VM from ubuntu:${options.image} with 2 and 3 GiB disks`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
+  const node = await step(`acquire a VM from ubuntu:${options.image} with 2 and 3 GiB disks, on its workspace's own network`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
   assert.equal(node.state, "ready", JSON.stringify(node));
+  assert.equal((await lxd.network(network)).config["security.acls"], machineNetworkAcl);
   await step("its disks, hostname and authorized key are in place", async () => {
     assert.deepEqual((await run("lsblk -dn -b -o SIZE,TYPE -e7 | awk '$2==\"disk\"{print $1}' | sort -n")).split("\n").map(Number).slice(0, 2), [2 * 1024 ** 3, 3 * 1024 ** 3]);
     assert.equal(await run("hostname"), "node-1");
@@ -112,7 +121,7 @@ try {
   await step("snapshot, change and restore the VM, its extra disks included", async () => {
     const mark = (text: string) => run(`echo ${text} > /root/mark && printf ${text} | dd of=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_lxd_disk1 conv=fsync status=none`);
     await mark("before");
-    assert.deepEqual((await leases.snapshot(workspaceId, ["node-1"], "clean"))[0]!.snapshots, ["clean"]);
+    assert.deepEqual((await leases.snapshot(workspaceId, ["node-1"], "clean", 10 * 60_000))[0]!.snapshots, ["clean"]);
     assert.equal((await lxd.instance(nodeInstance)).status, "Running");
     await mark("after-");
     const [restored] = await leases.restore(workspaceId, ["node-1"], "clean", 10 * 60_000);
@@ -121,11 +130,12 @@ try {
     assert.equal(await ssh(undefined, "hostname"), "node-1");
   });
 
-  const probe = await step("acquire a container", () => leases.acquire(workspaceId, { profile: "probe" }, 10 * 60_000));
+  const probe = await step("acquire a container, which the VM reaches by name", () => leases.acquire(workspaceId, { profile: "probe" }, 10 * 60_000));
   assert.equal(probe.state, "ready", JSON.stringify(probe));
+  await run(`timeout 10 bash -c '</dev/tcp/${probe.dnsName}/22'`);
   await assert.rejects(leases.acquire(workspaceId, { profile: "probe" }, 1_000), /already has 2 of its 2 machines/);
   await step("snapshot, change, restore the container", async () => {
-    await leases.snapshot(workspaceId, ["probe-1"], "clean");
+    await leases.snapshot(workspaceId, ["probe-1"], "clean", 5 * 60_000);
     assert.equal((await lxd.run(probeInstance, ["touch", "/root/experiment"])).exitCode, 0);
     const [restored] = await leases.restore(workspaceId, ["probe-1"], "clean", 5 * 60_000);
     assert.equal(restored!.state, "ready", JSON.stringify(restored));
@@ -134,7 +144,7 @@ try {
   });
 
   await step("snapshot the VM and the container together, change both, and restore them together", async () => {
-    await leases.snapshot(workspaceId, ["node-1", "probe-1"], "pair");
+    await leases.snapshot(workspaceId, ["node-1", "probe-1"], "pair", 10 * 60_000);
     assert.deepEqual(await Promise.all([nodeInstance, probeInstance].map(async (instance) => (await lxd.instance(instance)).status)), ["Running", "Running"]);
     for (const instance of [nodeInstance, probeInstance]) assert.equal((await lxd.run(instance, ["touch", "/root/experiment"])).exitCode, 0);
     const restored = await leases.restore(workspaceId, ["node-1", "probe-1"], "pair", 10 * 60_000);
@@ -142,10 +152,12 @@ try {
     for (const instance of [nodeInstance, probeInstance]) assert.equal((await lxd.run(instance, ["test", "-e", "/root/experiment"])).exitCode, 1);
   });
 
-  await step("release both, with their disks", async () => {
+  await step("release both, with their disks and network", async () => {
     await leases.release(workspaceId, "node-1");
     await leases.release(workspaceId, "probe-1");
-    cleanup.splice(0, 4);
+    cleanup.splice(0, 5);
+    const gone = await lxd.network(network).then(() => undefined, (caught: Error) => caught);
+    assert(gone instanceof LxdRequestError && gone.status === 404, `expected the network gone, got ${gone}`);
     assert.deepEqual(await leases.list(workspaceId), []);
     assert.equal(await lxc("list", "--project", project, on(), "-c", "n", "-f", "csv"), "");
     assert.equal(await lxc("storage", "volume", "list", on(pool), "--project", project, "type=custom", "-c", "n", "-f", "csv"), "");

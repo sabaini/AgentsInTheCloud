@@ -6,6 +6,7 @@ import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type Settin
 import { createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
 import { disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
 import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
+import { lxdVersionKeepsSnapshots, projectSandbox } from "./sandbox.ts";
 
 const sectionId = "settings-sec-machines";
 const connectPath = "/settings/machines/connect";
@@ -31,12 +32,17 @@ function row(label: string, contentHtml: string, actionsHtml = ""): string {
 
 function renderConnectForm(message: string): string {
   return row("LXD", `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
-    <p>Give Agents their own test machines on an LXD server, for work that needs real disks, its own kernel or several machines. On that server, run:</p>
+    <p>Give Agents their own test machines on a server with LXD 6.9 or later and OVN, like a MicroCloud, for work that needs real disks, its own kernel or several machines. On that server, run:</p>
     <pre class="settings-command">lxc project create ${suggestedProject} \\
-  -c features.images=false -c features.profiles=false
+  -c features.images=false -c features.profiles=true \\
+  -c features.networks=true -c restricted=true \\
+  -c restricted.snapshots=allow \\
+  -c restricted.networks.uplinks=UPLINK
+lxc profile device add default root disk path=/ \\
+  pool=local --project ${suggestedProject}
 lxc config trust add --name ${suggestedProject} \\
   --restricted --projects ${suggestedProject}</pre>
-    <p>Then paste the token it prints. AgentsInTheCloud can only use that project.</p>
+    <p>${notOnMicroCloud} Then paste the token the last command prints. AgentsInTheCloud can only use that project, and keeps each workspace’s machines on a network of their own.</p>
     ${message ? `<p class="settings-error">${escapeHtml(message)}</p>` : ""}
     <div class="machines-connect__controls">
       <input class="settings-input text-field" type="password" name="token" aria-label="LXD trust token" placeholder="Paste the trust token" autocomplete="off" data-1p-ignore required>
@@ -65,6 +71,20 @@ function renderUntracked(machines: LxdInstance[]): string {
   return `<div class="machines-untracked"><p>These machines don’t belong to a workspace anymore. Delete them, with their disks and snapshots, when you no longer need them.</p><div class="managed-list">${rows}</div></div>`;
 }
 
+const notOnMicroCloud = "Not on a MicroCloud? Use your OVN uplink network and storage pool in place of UPLINK and local.";
+
+/** The commands that would sandbox the project, if it isn't, and whether they name MicroCloud's uplink or pool. */
+function sandboxFixes(project: string, config: Record<string, string>) {
+  const { missing, unsafe } = projectSandbox(config);
+  const commands: string[] = [];
+  if (missing.length) commands.push(`lxc project set ${project} ${missing.join(" ")}`);
+  // Its own default profile starts out empty. LXD itself says when the project has to be emptied first.
+  const ownProfiles = missing.includes("features.profiles=true");
+  if (ownProfiles) commands.push(`lxc profile device add default root disk path=/ pool=local --project ${project}`);
+  commands.push(...unsafe.map((key) => `lxc project unset ${project} ${key}`));
+  return { commands, microCloudNames: ownProfiles || missing.includes("restricted.networks.uplinks=UPLINK") };
+}
+
 async function renderConnection(connection: LxdConnection, message: string): Promise<string> {
   const disconnect = `<form method="post" action="${disconnectPath}" data-turbo="true">${destructiveConfirmationHtml({
     id: "disconnect_lxd",
@@ -81,8 +101,12 @@ async function renderConnection(connection: LxdConnection, message: string): Pro
   try {
     const [server, config, untracked] = await Promise.race([Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]), deadline]);
     const limits = limitLabels.flatMap(([key, label]) => config[key] ? [label(config[key])] : []);
+    const upgrade = lxdVersionKeepsSnapshots(server.version) ? "" : `<div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> No new machines until the server runs LXD 6.9 or later. On a snap install, run <code>snap refresh lxd --channel=6/stable</code> there.</div>`;
+    const fixes = sandboxFixes(connection.project, config);
+    const sandbox = fixes.commands.length ? `<div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> No new machines until this project keeps them apart from the rest of the network. On the LXD server, run:</div>
+      <pre class="settings-command">${escapeHtml(fixes.commands.join("\n"))}</pre>${fixes.microCloudNames ? `<div class="managed-list__description">${notOnMicroCloud}</div>` : ""}` : "";
     return row(`LXD on ${server.name}`, `<div class="managed-list__description">${escapeHtml(`${where} · LXD ${server.version}`)}</div>
-      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>`, disconnect) + notice + renderUntracked(untracked);
+      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>${upgrade}${sandbox}`, disconnect) + notice + renderUntracked(untracked);
   } catch (error) {
     return row("LXD", `<div class="managed-list__description">${escapeHtml(where)}</div>
       <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can't reach it right now: ${errorMessage(error)}`)}</div>`, disconnect) + notice;

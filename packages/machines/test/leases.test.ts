@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LxdRequestError } from "../src/lxd/index.ts";
 import { createMachineLeases, machineInstanceName, type MachineLeaseDependencies, type MachineSettings } from "../src/server/leases.ts";
+import { machineNetworkAcl, machineNetworkAclRules, workspaceNetworkConfig, workspaceNetworkName } from "../src/server/sandbox.ts";
 import { clientProfile as client, FakeLxd, nodeProfile as node } from "./fake-lxd.ts";
 
 let directory: string;
@@ -60,8 +61,77 @@ test("a machine gets its disks in its root disk's pool, the workspace key, and w
   expect((await leases.acquire("w2", { profile: "node" }, 5_000)).name).toBe("node-1");
 });
 
+test("each workspace's machines share a network of their own, behind one ACL, until the last of them goes", async () => {
+  const leases = createMachineLeases(dependencies());
+  const node = await leases.acquire("w1", { profile: "node" }, 5_000);
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  await leases.acquire("w2", { profile: "client" }, 5_000);
+  const network = workspaceNetworkName("w1");
+  for (const name of ["node-1", "client-1"]) expect(lxd.instancesByName.get(machineInstanceName("w1", name))!.devices.eth0).toEqual({ type: "nic", name: "eth0", network });
+  expect(lxd.networks).toEqual(new Map([[network, workspaceNetworkConfig("UPLINK")], [workspaceNetworkName("w2"), workspaceNetworkConfig("UPLINK")]]));
+  expect(lxd.acls.get(machineNetworkAcl)).toEqual({ egress: machineNetworkAclRules().egress, ingress: machineNetworkAclRules().ingress });
+  // The others know it by its instance name, not by its hostname.
+  expect(node.dnsName).toBe(`${machineInstanceName("w1", "node-1")}.lxd`);
+
+  await leases.release("w1", "node-1");
+  expect(lxd.networks.has(network)).toBe(true);
+  await leases.release("w1", "client-1");
+  expect(lxd.networks.has(network)).toBe(false);
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  expect(lxd.networks.has(network)).toBe(true);
+
+  // A machine AgentsInTheCloud lost track of keeps it.
+  await lxd.createInstance({ name: "left-behind", type: "container", source: { type: "image", alias: "24.04" }, devices: { eth0: { type: "nic", network } } });
+  await leases.release("w1", "client-1");
+  expect(await leases.stored("w1")).toEqual([]);
+  expect(lxd.networks.has(network)).toBe(true);
+});
+
+test("the ACL, and what keeps the workspace's network sandboxed, are put back before each new machine", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  const rules = lxd.acls.get(machineNetworkAcl);
+  lxd.log = [];
+  await leases.acquire("w2", { profile: "client" }, 5_000);
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  expect(lxd.log.filter((entry) => entry.startsWith("update "))).toEqual([]);
+
+  lxd.acls.set(machineNetworkAcl, { egress: [{ action: "allow", destination: "0.0.0.0/0", state: "enabled" }], ingress: [] });
+  const network = workspaceNetworkName("w1");
+  const { "security.acls": _, ...unfiltered } = lxd.networks.get(network)!;
+  lxd.networks.set(network, { ...unfiltered, "security.acls.default.egress.action": "allow", "ipv4.nat": "true" });
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  expect(lxd.acls.get(machineNetworkAcl)).toEqual(rules!);
+  // Its other settings stay.
+  expect(lxd.networks.get(network)).toEqual({ ...workspaceNetworkConfig("UPLINK"), "ipv4.nat": "true" });
+});
+
+test("a machine profile whose LXD profiles add a network device is refused, as it would get past the workspace's network", async () => {
+  const leases = createMachineLeases(dependencies());
+  lxd.profiles.set("bridged", { eth1: { type: "nic", network: workspaceNetworkName("w2") } });
+  settings.profiles.push({ ...client, name: "bridged", lxdProfiles: ["default", "bridged"] });
+  await expect(leases.acquire("w1", { profile: "bridged" }, 5_000)).rejects.toThrow("The LXD profile bridged gives machines another network device, eth1");
+  expect([lxd.instancesByName.size, lxd.networks.size]).toEqual([0, 0]);
+  // One a later profile takes away again is fine, as is the default profile's eth0, which the machine's own replaces.
+  lxd.profiles.set("unbridged", { eth1: { type: "none" } });
+  settings.profiles.push({ ...client, name: "unbridged", lxdProfiles: ["default", "bridged", "unbridged"] });
+  expect((await leases.acquire("w1", { profile: "unbridged" }, 5_000)).state).toBe("ready");
+});
+
 test("requests that can't be met are refused before anything is created", async () => {
   const leases = createMachineLeases(dependencies());
+  const sandboxed = lxd.projectSettings;
+  lxd.projectSettings = { ...sandboxed, "restricted.devices.proxy": "allow" };
+  await expect(leases.acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("The LXD project agents-in-the-cloud isn't set up to keep machines apart from the rest of the network");
+  expect([lxd.networks.size, lxd.acls.size]).toEqual([0, 0]);
+  lxd.projectSettings = sandboxed;
+  lxd.version = "6.8";
+  await expect(leases.acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("The LXD server runs LXD 6.8, and machines need LXD 6.9 or later");
+  lxd.version = "6.9";
+  const cephNode = lxd.profiles.get("ceph-node")!;
+  lxd.profiles.delete("ceph-node");
+  await expect(leases.acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("The LXD server has no profile called ceph-node. Create it there, or change the machine profile in the template's settings.");
+  lxd.profiles.set("ceph-node", cephNode);
   await expect(leases.acquire("w1", { profile: "osd" }, 5_000)).rejects.toThrow("no machine profile called osd. This workspace can use node, client");
   await expect(leases.acquire("w1", { profile: "node", name: "Node 1" }, 5_000)).rejects.toThrow("lowercase letters");
   await expect(createMachineLeases(dependencies({ reachesMachines: async () => false })).acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("older than machines");
@@ -98,9 +168,6 @@ test("failures are kept on the machine, and releasing it cleans up what was made
   expect(await leases.list("w1")).toEqual([]);
 
   lxd.failCreate = undefined;
-  lxd.profiles.delete("ceph-node");
-  expect((await leases.acquire("w1", { profile: "node", name: "unprofiled" }, 5_000)).error).toBe("The LXD server has no profile called ceph-node. Create it there, or change the machine profile in the template's settings.");
-  await leases.release("w1", "unprofiled");
   lxd.hostKeys = new Map();
   expect((await leases.acquire("w1", { profile: "client" }, 5_000)).error).toContain("needs openssh-server");
   lxd.probesUntilBooted = Number.POSITIVE_INFINITY;
@@ -133,11 +200,9 @@ test("after a restart, machines that were booting carry on and ones never create
 test("snapshots restore a machine and wait for it to come back", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await expect(leases.snapshot("w1", ["node-1"], "clean slate")).rejects.toThrow("Snapshot names");
-  expect((await leases.snapshot("w1", ["node-1"], "clean"))[0]!.snapshots).toEqual(["clean"]);
+  await expect(leases.snapshot("w1", ["node-1"], "clean slate", 5_000)).rejects.toThrow("Snapshot names");
+  expect(await leases.snapshot("w1", ["node-1"], "clean", 5_000)).toMatchObject([{ state: "ready", snapshots: ["clean"] }]);
   const instance = lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!;
-  instance.status = "Frozen";
-  expect((await leases.list("w1"))[0]!.state).toBe("paused");
   instance.status = "Stopped";
   expect((await leases.list("w1"))[0]!.state).toBe("stopped");
   // Booting again, it still has its snapshots.
@@ -148,19 +213,18 @@ test("snapshots restore a machine and wait for it to come back", async () => {
   expect(instance.status).toBe("Running");
 });
 
-test("a snapshot has what the machine has written and its extra disks too, saved while it's paused, and restoring rolls them back with it", async () => {
+test("a snapshot has the machine's extra disks too, saved while it's shut down, and restoring rolls them back with it", async () => {
   const instance = machineInstanceName("w1", "node-1");
   let shown: string[] = [];
-  const leases = createMachineLeases(dependencies({ changed: async () => { shown.push(lxd.instancesByName.get(instance)?.status ?? "none"); } }));
+  const leases = createMachineLeases(dependencies({ changed: async () => { shown.push(...(await leases.list("w1")).map((machine) => machine.state)); } }));
   await leases.acquire("w1", { profile: "node" }, 5_000);
   const disks = [1, 2, 3].map((n) => `${instance}-disk${n}`);
   shown = [];
   lxd.log = [];
-  await leases.snapshot("w1", ["node-1"], "clean");
-  expect(lxd.log).toEqual([`run sync in ${instance} while Running`, `freeze ${instance}`, ...disks.map((disk) => `snapshot ${disk} clean while Frozen`), `snapshot ${instance} clean while Frozen`, `unfreeze ${instance}`]);
-  // The Machines view shows it paused, then running again.
-  expect(shown).toEqual(["Frozen", "Running"]);
-  expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
+  expect((await leases.snapshot("w1", ["node-1"], "clean", 5_000))[0]!.state).toBe("ready");
+  expect(lxd.log).toEqual([`stop ${instance}`, ...disks.map((disk) => `snapshot ${disk} clean while Stopped`), `snapshot ${instance} clean while Stopped`, `start ${instance}`]);
+  // The Machines view shows it shut down for the snapshot, then booting and ready again.
+  expect(shown).toEqual(["saving", "starting", "ready"]);
 
   lxd.log = [];
   expect((await leases.restore("w1", ["node-1"], "clean", 5_000))[0]!.state).toBe("ready");
@@ -172,25 +236,26 @@ test("a snapshot has what the machine has written and its extra disks too, saved
   expect(lxd.volumeSnapshots.size).toBe(0);
 });
 
-test("machines snapshotted together pause together, and restored together all stop before any is restored", async () => {
+test("machines snapshotted together shut down together, and restored together all stop before any is restored", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
   await leases.acquire("w1", { profile: "client", name: "b" }, 5_000);
   const [a, b] = ["a", "b"].map((name) => machineInstanceName("w1", name));
   lxd.log = [];
-  expect((await leases.snapshot("w1", ["a", "b"], "formed")).map((machine) => machine.snapshots)).toEqual([["formed"], ["formed"]]);
-  expect(lxd.log).toEqual([`run sync in ${a} while Running`, `run sync in ${b} while Running`, `freeze ${a}`, `freeze ${b}`, `snapshot ${a} formed while Frozen`, `snapshot ${b} formed while Frozen`, `unfreeze ${a}`, `unfreeze ${b}`]);
-  await expect(leases.snapshot("w1", ["a", "b"], "formed")).rejects.toThrow("a already has a snapshot called formed");
-  await expect(leases.snapshot("w1", ["a", "a"], "again")).rejects.toThrow("Name each machine once");
-
-  // A single machine without extra disks has nothing to keep in step, so it doesn't pause.
-  lxd.log = [];
-  await leases.snapshot("w1", ["a"], "alone");
-  expect(lxd.log).toEqual([`run sync in ${a} while Running`, `snapshot ${a} alone while Running`]);
+  expect((await leases.snapshot("w1", ["a", "b"], "formed", 5_000)).map((machine) => [machine.state, machine.snapshots])).toEqual([["ready", ["formed"]], ["ready", ["formed"]]]);
+  expect(lxd.log).toEqual([`stop ${a}`, `stop ${b}`, `snapshot ${a} formed while Stopped`, `snapshot ${b} formed while Stopped`, `start ${a}`, `start ${b}`]);
+  await expect(leases.snapshot("w1", ["a", "b"], "formed", 5_000)).rejects.toThrow("a already has a snapshot called formed");
+  await expect(leases.snapshot("w1", ["a", "a"], "again", 5_000)).rejects.toThrow("Name each machine once");
 
   lxd.log = [];
   expect((await leases.restore("w1", ["a", "b"], "formed", 5_000)).map((machine) => machine.state)).toEqual(["ready", "ready"]);
   expect(lxd.log).toEqual([`stop ${a}`, `stop ${b}`, `restore ${a} formed while Stopped`, `restore ${b} formed while Stopped`, `start ${a}`, `start ${b}`]);
+
+  // One that's stopped already, say since its workspace was parked, is saved as it is and stays stopped.
+  await leases.stopAll("w1");
+  lxd.log = [];
+  expect((await leases.snapshot("w1", ["a"], "alone", 5_000))[0]!.state).toBe("stopped");
+  expect(lxd.log).toEqual([`snapshot ${a} alone while Stopped`]);
   // All of them need the snapshot before any is touched.
   lxd.log = [];
   await expect(leases.restore("w1", ["a", "b"], "alone", 5_000)).rejects.toThrow("b has no snapshot called alone");
@@ -200,7 +265,7 @@ test("machines snapshotted together pause together, and restored together all st
 test("a machine whose restore doesn't finish stays stopped until one does", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await leases.snapshot("w1", ["node-1"], "clean");
+  await leases.snapshot("w1", ["node-1"], "clean", 5_000);
   const restoreVolume = lxd.restoreVolumeSnapshot.bind(lxd);
   lxd.restoreVolumeSnapshot = async (pool, volume, snapshot) => {
     if (volume.endsWith("-disk2")) throw new LxdRequestError(500, "No space left on device");
@@ -212,7 +277,7 @@ test("a machine whose restore doesn't finish stays stopped until one does", asyn
   await leases.usable("w1", "node-1", 5_000);
   await leases.wake("w1");
   expect(lxd.instancesByName.get(machineInstanceName("w1", "node-1"))!.status).toBe("Stopped");
-  await expect(leases.snapshot("w1", ["node-1"], "later")).rejects.toThrow("isn't ready");
+  await expect(leases.snapshot("w1", ["node-1"], "later", 5_000)).rejects.toThrow("isn't ready");
 
   // Nor after AgentsInTheCloud restarts in the middle of a restore.
   lxd.restoreVolumeSnapshot = () => new Promise(() => {});
@@ -225,12 +290,37 @@ test("a machine whose restore doesn't finish stays stopped until one does", asyn
   expect((await restarted.restore("w1", ["node-1"], "clean", 5_000))[0]!.state).toBe("ready");
 });
 
-test("a snapshot unfreezes the machine even when showing it paused fails", async () => {
-  const instance = machineInstanceName("w1", "node-1");
-  const leases = createMachineLeases(dependencies({ changed: async () => { if (lxd.instancesByName.get(instance)?.status === "Frozen") throw new Error("Couldn't write the workspace's ssh config"); } }));
+test("a machine shut down for a snapshot starts again when the snapshot fails", async () => {
+  const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
-  await expect(leases.snapshot("w1", ["node-1"], "clean")).rejects.toThrow("Couldn't write the workspace's ssh config");
-  expect(lxd.instancesByName.get(instance)!.status).toBe("Running");
+  lxd.createSnapshot = async () => { throw new LxdRequestError(500, "No space left on device"); };
+  await expect(leases.snapshot("w1", ["node-1"], "clean", 5_000)).rejects.toThrow("No space left on device");
+  // It's watched while it boots, so ssh waits for it without anything listing it first.
+  await leases.usable("w1", "node-1", 5_000);
+  expect(await leases.stored("w1")).toMatchObject([{ status: "ready" }]);
+  expect((await leases.list("w1"))[0]).toMatchObject({ state: "ready", snapshots: [] });
+});
+
+test("when one machine doesn't shut down for a snapshot, the others start again once they have", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
+  await leases.acquire("w1", { profile: "client", name: "b" }, 5_000);
+  const [a, b] = ["a", "b"].map((name) => machineInstanceName("w1", name));
+  const setState = lxd.setInstanceState.bind(lxd);
+  let stopB: (() => void) | undefined;
+  lxd.setInstanceState = async (name, action) => {
+    if (action === "stop" && name === a) throw new LxdRequestError(500, "Failed to stop");
+    if (action === "stop" && name === b) await new Promise<void>((resolve) => { stopB = resolve; });
+    await setState(name, action);
+  };
+  const snapshotting = leases.snapshot("w1", ["a", "b"], "formed", 5_000);
+  while (!stopB) await Bun.sleep(1);
+  await Bun.sleep(20);
+  stopB();
+  await expect(snapshotting).rejects.toThrow("Failed to stop");
+  expect([a, b].map((name) => lxd.instancesByName.get(name)!.status)).toEqual(["Running", "Running"]);
+  await leases.usable("w1", "b", 5_000);
+  expect((await leases.list("w1")).map((machine) => [machine.state, machine.snapshots])).toEqual([["ready", []], ["ready", []]]);
 });
 
 test("parking stops ready machines, and their next use starts them again", async () => {
@@ -342,7 +432,7 @@ test("machines stay with the LXD server they're on: with another connected, they
   expect((await leases.list("w1")).map((machine) => [machine.name, machine.state])).toEqual([["node-1", "disconnected"], ["client-1", "ready"]]);
   const elsewhere = "node-1 is on the LXD server at lxd.test:8443, in project agents-in-the-cloud, which isn't connected now";
   await expect(leases.release("w1", "node-1")).rejects.toThrow(elsewhere);
-  await expect(leases.snapshot("w1", ["node-1"], "clean")).rejects.toThrow(elsewhere);
+  await expect(leases.snapshot("w1", ["node-1"], "clean", 5_000)).rejects.toThrow(elsewhere);
   await expect(leases.usable("w1", "node-1", 5_000)).rejects.toThrow(elsewhere);
   expect(await leases.expire("w1", Number.POSITIVE_INFINITY)).toEqual(["client-1"]);
   expect((await leases.stored("w1")).map((lease) => lease.name)).toEqual(["node-1"]);

@@ -41,6 +41,13 @@ export interface LxdInstancesPost {
   start?: boolean;
 }
 
+/** A network ACL rule as AITC writes it. LXD leaves fields that are empty out of its own answers too. */
+export interface LxdNetworkAclRule { action: "allow" | "reject" | "drop"; source?: string; destination?: string; state: "enabled" }
+export interface LxdNetworkAclPut { description: string; egress: LxdNetworkAclRule[]; ingress: LxdNetworkAclRule[] }
+interface LxdNetworkAclsPost extends LxdNetworkAclPut { name: string }
+export interface LxdNetworksPost { name: string; description: string; type: "ovn"; config: Record<string, string> }
+interface LxdNetworkPatch { config: LxdNetworksPost["config"] }
+
 interface LxdStatePut { action: "start" | "stop" | "restart" | "freeze" | "unfreeze"; force: boolean; timeout: number }
 interface LxdSnapshotsPost { name: string }
 interface LxdRestorePut { restore: string }
@@ -53,7 +60,7 @@ interface LxdExecPost {
   "wait-for-websocket": true;
   "record-output": false;
 }
-type LxdRequestBody = LxdInstancesPost | LxdStatePut | LxdSnapshotsPost | LxdRestorePut | LxdVolumesPost | LxdCertificatesPost | LxdExecPost;
+type LxdRequestBody = LxdInstancesPost | LxdStatePut | LxdSnapshotsPost | LxdRestorePut | LxdVolumesPost | LxdCertificatesPost | LxdExecPost | LxdNetworksPost | LxdNetworkPatch | LxdNetworkAclsPost | LxdNetworkAclPut;
 
 const errorResponse = Type.Object({ type: Type.Literal("error"), error: Type.String(), error_code: Type.Number() });
 const syncResponse = <T extends TSchema>(metadata: T) => Type.Object({ type: Type.Literal("sync"), metadata });
@@ -78,6 +85,11 @@ export type LxdInstance = Static<typeof instanceSchema>;
 export interface LxdInstanceDetails { snapshots: string[]; addresses: string[] }
 const instanceResponse = syncResponse(instanceSchema);
 const instancesResponse = syncResponse(Type.Array(instanceSchema));
+const networkResponse = syncResponse(Type.Object({ config: Type.Record(Type.String(), Type.String()), used_by: Type.Union([Type.Array(Type.String()), Type.Null()]) }));
+const networkAclRule = Type.Record(Type.String(), Type.String());
+const networkAclResponse = syncResponse(Type.Object({ egress: Type.Array(networkAclRule), ingress: Type.Array(networkAclRule) }));
+export interface LxdNetwork { config: Record<string, string>; usedBy: string[] }
+export type LxdNetworkAcl = Pick<Static<typeof networkAclResponse>["metadata"], "egress" | "ingress">;
 const profileResponse = syncResponse(Type.Object({ devices: Type.Record(Type.String(), Type.Record(Type.String(), Type.String())) }));
 const instanceNetwork = Type.Record(Type.String(), Type.Object({
   /** The device's host side; empty for interfaces the instance made itself, like docker0. */
@@ -206,6 +218,39 @@ export class LxdClient extends LxdServerClient {
   /** An LXD profile's devices. With features.profiles off, the project shares the default project's profiles. */
   async profileDevices(profile: string): Promise<Record<string, Record<string, string>>> {
     return (await this.get(profileResponse, `/1.0/profiles/${name(profile)}`)).metadata.devices;
+  }
+
+  async network(network: string): Promise<LxdNetwork> {
+    const { config, used_by } = (await this.get(networkResponse, `/1.0/networks/${name(network)}`)).metadata;
+    return { config, usedBy: used_by ?? [] };
+  }
+
+  async createNetwork(post: LxdNetworksPost): Promise<void> {
+    await this.perform("POST", "/1.0/networks", post);
+  }
+
+  /** Sets these settings, leaving the network's others as they are. */
+  async updateNetwork(network: string, config: LxdNetworksPost["config"]): Promise<void> {
+    await this.perform("PATCH", `/1.0/networks/${name(network)}`, { config });
+  }
+
+  /** LXD refuses while an instance uses the network. */
+  async deleteNetwork(network: string): Promise<void> {
+    await this.perform("DELETE", `/1.0/networks/${name(network)}`);
+  }
+
+  async networkAcl(acl: string): Promise<LxdNetworkAcl> {
+    const { egress, ingress } = (await this.get(networkAclResponse, `/1.0/network-acls/${name(acl)}`)).metadata;
+    return { egress, ingress };
+  }
+
+  async createNetworkAcl(acl: string, put: LxdNetworkAclPut): Promise<void> {
+    await this.perform("POST", "/1.0/network-acls", { name: acl, ...put });
+  }
+
+  /** Replaces the ACL's rules; every network using it follows. */
+  async updateNetworkAcl(acl: string, put: LxdNetworkAclPut): Promise<void> {
+    await this.perform("PUT", `/1.0/network-acls/${name(acl)}`, put);
   }
 
   async createInstance(post: LxdInstancesPost): Promise<void> {

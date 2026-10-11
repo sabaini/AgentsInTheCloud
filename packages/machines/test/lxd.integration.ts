@@ -1,10 +1,10 @@
-/** Exercise the LXD client against a real LXD server: a fresh project, a restricted
- * trust token redeemed by a new AITC client certificate, and one container driven only
- * through the API. Needs `lxc` with admin access to the server (the local one, or the
- * `--remote` it names) and that server listening on HTTPS.
+/** Exercise the LXD client against a real LXD server with OVN: a fresh sandboxed project, a restricted
+ * trust token redeemed by a new AITC client certificate, and one container, a network and an ACL driven
+ * only through the API. Needs `lxc` with admin access to the server (the local one, or the `--remote` it
+ * names) and that server listening on HTTPS. `--uplink` is its OVN uplink network.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
- *   bun run test:lxd [--remote <lxc-remote>] [--image <ubuntu-release>]
+ *   bun run test:lxd [--remote <lxc-remote>] [--uplink UPLINK] [--image <ubuntu-release>]
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -15,7 +15,9 @@ const project = `aitc-it-${randomUUID().slice(0, 8)}`;
 // Unique like the project: LXD wants DNS names unique on the network across projects, kept failed runs included.
 const instance = `machine-${project.slice(-8)}`;
 const volume = `${instance}-disk-1`;
-const { values: options } = parseArgs({ options: { remote: { type: "string" }, image: { type: "string", default: "24.04" } } });
+const network = `net-${project.slice(-8)}`;
+const acl = `acl-${project.slice(-8)}`;
+const { values: options } = parseArgs({ options: { remote: { type: "string" }, uplink: { type: "string", default: "UPLINK" }, image: { type: "string", default: "24.04" } } });
 const alias = options.image;
 /** A name on the server under test, as `lxc` addresses it. */
 const on = (name = "") => options.remote ? `${options.remote}:${name}` : name;
@@ -39,8 +41,10 @@ try {
   console.log(`LXD ${(await lxc("query", `${on()}/1.0`)).match(/"server_version": "([^"]+)"/)?.[1]}`);
   // The pool the root disk uses: "default" on a plain LXD, "local" on MicroCloud.
   const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
-  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=false");
+  // As the connect form suggests.
+  await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
   cleanup.unshift(["project", "delete", on(project)]);
+  await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
   const token = (await lxc("config", "trust", "add", ...(options.remote ? [on()] : []), "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;
   const credentials = await step("create AITC client certificate", () => createLxdClientCredentials(project));
   const joined = await step("join with a restricted trust token", () => joinLxdServer(token, credentials));
@@ -50,10 +54,32 @@ try {
   assert.equal(joined.project, project);
   const lxd = new LxdClient({ server, credentials, project });
 
-  await step("restricted to its own project", async () => {
+  await step("restricted to its own project, whose config it can read", async () => {
     const outside = new LxdClient({ server, credentials, project: "default" });
     const error = await outside.instances().then(() => undefined, (caught: Error) => caught);
     assert(error instanceof LxdRequestError && error.status === 403, `expected 403 outside the project, got ${error}`);
+    assert.equal((await lxd.projectConfig(project))["restricted.networks.uplinks"], options.uplink);
+  });
+
+  await step("make an OVN network behind an ACL, change the ACL, and delete the network (AITC never deletes its ACL)", async () => {
+    const internal = { action: "allow" as const, destination: "@internal", state: "enabled" as const };
+    await lxd.createNetworkAcl(acl, { description: "", egress: [internal], ingress: [] });
+    cleanup.unshift(["network", "acl", "delete", on(acl), "--project", project]);
+    await lxd.createNetwork({ name: network, description: "", type: "ovn", config: { network: options.uplink, "ipv6.address": "none", "security.acls": acl } });
+    cleanup.unshift(["network", "delete", on(network), "--project", project]);
+    // LXD leaves the rules' empty fields out.
+    assert.deepEqual(await lxd.networkAcl(acl), { egress: [internal], ingress: [] });
+    await lxd.updateNetworkAcl(acl, { description: "", egress: [internal], ingress: [{ action: "allow", source: "@internal", state: "enabled" }] });
+    assert.deepEqual((await lxd.networkAcl(acl)).ingress, [{ action: "allow", source: "@internal", state: "enabled" }]);
+    const created = await lxd.network(network);
+    assert.equal(created.config["security.acls"], acl);
+    assert.deepEqual(created.usedBy, []);
+    await lxd.deleteNetwork(network);
+    cleanup.shift();
+    const gone = await lxd.network(network).then(() => undefined, (caught: Error) => caught);
+    assert(gone instanceof LxdRequestError && gone.status === 404, `expected the network gone, got ${gone}`);
+    await lxc("network", "acl", "delete", on(acl), "--project", project);
+    cleanup.shift();
   });
 
   await step(`create and start a container from ubuntu:${alias}`, () => lxd.createInstance({
