@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { blockedEgressIpv4Ranges, blockedEgressIpv6Ranges, isPrivateNetworkAddress, isWorkspaceEgressAddress, workspaceEgressNftIpv4Elements } from "./egress-policy.ts";
+import { blockedEgressIpv4Ranges, blockedEgressIpv6Ranges, isPrivateNetworkAddress, isWorkspaceEgressAddress, workspaceEgressIpv4AllowedCidrs, workspaceEgressNftIpv4Elements } from "./egress-policy.ts";
 
 test("public internet addresses are the only allowed egress destinations", () => {
   for (const ip of ["93.184.215.14", "8.8.8.8", "1.1.1.1", "2606:4700:10::6814:179a", "2001:4860:4860::8888"]) {
@@ -18,6 +18,23 @@ test("every private and special-purpose range is denied", () => {
   ];
   for (const ip of denied) expect(isWorkspaceEgressAddress(ip), ip).toBe(false);
   for (const ip of ["example.com", "", "93.184.215.14 ", "2001:db8::g"]) expect(isWorkspaceEgressAddress(ip)).toBe(false);
+});
+
+test("the allowed IPv4 blocks are exactly the addresses outside the blocked ranges", () => {
+  const span = (cidr: string) => {
+    const [address, prefix] = cidr.split("/");
+    const start = address!.split(".").reduce((value, octet) => value * 256 + Number(octet), 0);
+    return [start, start + 2 ** (32 - Number(prefix))] as const;
+  };
+  const allowed = workspaceEgressIpv4AllowedCidrs().map(span);
+  const blocked = blockedEgressIpv4Ranges.map(([address, prefix]) => span(`${address}/${prefix}`));
+  // Together, without overlap, they cover every address once.
+  const all = [...allowed, ...blocked].sort((a, b) => a[0] - b[0]);
+  expect(all[0]![0]).toBe(0);
+  for (const [index, [, end]] of all.entries()) expect(end).toBe(all[index + 1]?.[0] ?? 2 ** 32);
+  // Each block starts on its own boundary, so it's a valid CIDR.
+  for (const [start, end] of allowed) expect(start % (end - start)).toBe(0);
+  expect(allowed).toHaveLength(103);
 });
 
 test("the nft element list matches the checked ranges", () => {

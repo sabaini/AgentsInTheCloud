@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { certificateFingerprint, createLxdClientCredentials } from "../src/lxd/index.ts";
 import { saveLxdConnection } from "../src/server/connection.ts";
 import { deleteUntrackedMachine, machinesDeletionReview, untrackedMachines } from "../src/server/lifecycle.ts";
+import { workspaceNetworkName } from "../src/server/sandbox.ts";
 import { FakeLxd } from "./fake-lxd.ts";
 
 let previousDataDir: string | undefined;
@@ -20,8 +21,9 @@ beforeEach(async () => {
   await mkdir(join(dataDir, "machines", "workspaces", "w1"), { recursive: true });
   await writeFile(join(dataDir, "machines", "workspaces", "w1", "leases.json"), JSON.stringify({ leases: [lease] }));
   const source = { type: "image" as const, alias: "24.04" };
-  await lxd.createInstance({ name: "node-1-aaaa", type: "virtual-machine", source, config: { "user.aitc.workspace": "w1" } });
-  await lxd.createInstance({ name: "lost-bbbb", type: "virtual-machine", source, config: { "user.aitc.workspace": "gone", "user.aitc.lease": "lost" }, devices: { disk1: { type: "disk", pool: "default", source: "lost-bbbb-disk1" } } });
+  for (const workspace of ["w1", "gone"]) await lxd.createNetwork({ name: workspaceNetworkName(workspace), description: "", type: "ovn", config: {} });
+  await lxd.createInstance({ name: "node-1-aaaa", type: "virtual-machine", source, config: { "user.aitc.workspace": "w1" }, devices: { eth0: { type: "nic", network: workspaceNetworkName("w1") } } });
+  await lxd.createInstance({ name: "lost-bbbb", type: "virtual-machine", source, config: { "user.aitc.workspace": "gone", "user.aitc.lease": "lost" }, devices: { eth0: { type: "nic", network: workspaceNetworkName("gone") }, disk1: { type: "disk", pool: "default", source: "lost-bbbb-disk1" } } });
   await lxd.createBlockVolume("default", "lost-bbbb-disk1", "1GiB");
   await lxd.createInstance({ name: "someone-elses", type: "container", source });
 });
@@ -45,13 +47,20 @@ test("deleting a workspace with machines asks first, naming the ones that go wit
   expect(review).toMatchObject({ status: "blocked", details: { deleted: ["here"], kept: ["elsewhere"] } });
 });
 
-test("only tagged machines no workspace tracks count as untracked, and deleting one takes its disks", async () => {
+test("only tagged machines no workspace tracks count as untracked, and deleting one takes its disks and network", async () => {
   expect((await untrackedMachines(lxd)).map((machine) => machine.name)).toEqual(["lost-bbbb"]);
   await expect(deleteUntrackedMachine(lxd, "node-1-aaaa")).rejects.toThrow("lost track of");
   await expect(deleteUntrackedMachine(lxd, "someone-elses")).rejects.toThrow("lost track of");
   await deleteUntrackedMachine(lxd, "lost-bbbb");
   expect([...lxd.instancesByName.keys()]).toEqual(["node-1-aaaa", "someone-elses"]);
   expect(lxd.volumes.size).toBe(0);
+  expect([...lxd.networks.keys()]).toEqual([workspaceNetworkName("w1")]);
+
+  // One whose workspace still has a machine here leaves the network to it, even while that one isn't created yet.
+  lxd.instancesByName.delete("node-1-aaaa");
+  await lxd.createInstance({ name: "stray-aaaa", type: "container", source: { type: "image", alias: "24.04" }, config: { "user.aitc.workspace": "w1" }, devices: { eth0: { type: "nic", network: workspaceNetworkName("w1") } } });
+  await deleteUntrackedMachine(lxd, "stray-aaaa");
+  expect([...lxd.networks.keys()]).toEqual([workspaceNetworkName("w1")]);
 });
 
 test("a machine tracked on another LXD server doesn't hide one of the same name here", async () => {

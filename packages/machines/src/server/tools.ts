@@ -14,12 +14,12 @@ function describeMachine(machine: MachineView): string {
   const disks = machine.diskSizesGiB.length ? ` with ${machine.diskSizesGiB.length === 1 ? "an extra disk" : `${machine.diskSizesGiB.length} extra disks`} (${machine.diskSizesGiB.join(", ")} GiB)` : "";
   const what = `a ${kind(machine.type)} from ${machine.image}${disks}, made from profile ${machine.profile}, until ${machine.expiresAt}`;
   const snapshots = machine.snapshots.length ? ` Snapshots: ${machine.snapshots.join(", ")}.` : "";
-  const addresses = machine.addresses.length ? ` Other machines reach it at ${machine.addresses.join(" or ")}, not by name.` : "";
+  const addresses = machine.addresses.length ? ` Other machines reach it as ${machine.dnsName} or at ${machine.addresses.join(" or ")}, not as ${machine.name}.` : "";
   switch (machine.state) {
     case "ready": return `${machine.name} is ready: ${what}. Reach it with \`ssh ${machine.name}\`; scp and rsync work too.${addresses}${snapshots}`;
     case "creating": return `${machine.name} is being created: ${what}. Wait for it with wait_for_machine.`;
     case "starting": return `${machine.name} is booting: ${what}. Wait for it with wait_for_machine.${snapshots}`;
-    case "paused": return `${machine.name} is paused while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
+    case "saving": return `${machine.name} is shut down while a snapshot of it is saved: ${what}. Wait for it with wait_for_machine.${snapshots}`;
     case "stopped": return `${machine.name} is stopped: ${what}. Connecting with ssh or wait_for_machine starts it again.${snapshots}`;
     case "restoring": return `${machine.name} is being restored to a snapshot: ${what}.${snapshots}`;
     case "interrupted": return `${machine.name} didn't finish restoring to a snapshot (${machine.error}), so its disks may be from different points in time: ${what}. It stays stopped until restore_machines succeeds, or release it with release_machine.${snapshots}`;
@@ -56,7 +56,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("acquire_machine", (workspaceId) => defineWorkspaceTool({
       name: "acquire_machine",
       label: "Acquire Machine",
-      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Once it has booted, `ssh <name>` reaches it from this workspace as ubuntu, with passwordless sudo; scp, rsync and tools like juju or ansible can use the name too. Machines reach each other at the addresses list_machines reports, not by name. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
+      description: "Create a fresh test machine for this workspace from one of its machine profiles: a virtual machine or container on the user's LXD server, with its own kernel and real disks, for work the workspace container can't do, like installing snaps, using block devices or forming clusters. Once it has booted, `ssh <name>` reaches it from this workspace as ubuntu, with passwordless sudo; scp, rsync and tools like juju or ansible can use the name too. Machines reach each other by the names and addresses list_machines reports, not by their short names. Waits until it has booted. Use list_machines to see the profiles. Release machines you no longer need.",
       parameters: Type.Object({
         profile: Type.String({ description: "Name of the machine profile to use." }),
         name: Type.Optional(Type.String({ description: "Name for the machine: lowercase letters, digits and hyphens. Defaults to the profile name and a number, like node-1." })),
@@ -69,7 +69,7 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("list_machines", (workspaceId) => defineWorkspaceTool({
       name: "list_machines",
       label: "List Machines",
-      description: "List this workspace's test machines with their state, addresses and expiry, and the machine profiles new ones can be created from. Machines stopped while the workspace was parked start again.",
+      description: "List this workspace's test machines with their state, the names and addresses other machines reach them at, and expiry, and the machine profiles new ones can be created from. Machines stopped while the workspace was parked start again.",
       parameters: Type.Object({}),
       execute: async () => {
         await leases.wake(workspaceId);
@@ -102,11 +102,11 @@ export function registerMachineTools(leases: MachineLeases): () => void {
     registerWorkspaceAgentTool("snapshot_machines", (workspaceId) => defineWorkspaceTool({
       name: "snapshot_machines",
       label: "Snapshot Machines",
-      description: "Save one or more machines' disks, extra disks included, as a named snapshot of each, to return to with restore_machines between experiments. Snapshot machines that work together, like a cluster's nodes, in one call: they're paused together, so the snapshot holds one moment across all of them. A single machine with extra disks pauses too. Snapshots last until the machine is released.",
+      description: "Save one or more machines' disks, extra disks included, as a named snapshot of each, to return to with restore_machines between experiments. The machines shut down for it and start again afterwards, so what's only in their memory is lost; this waits until they're back. Snapshot machines that work together, like a cluster's nodes, in one call: they shut down together, so the snapshot holds one moment across all of them. Snapshots last until the machine is released.",
       parameters: Type.Object({ machines: machineNames, snapshot: snapshotName }),
-      execute: async (_toolCallId, params: { machines: string[]; snapshot: string }) => {
-        const machines = await leases.snapshot(workspaceId, params.machines, params.snapshot);
-        return result(`Saved snapshot ${params.snapshot} of ${listed(params.machines)}.`, { machines });
+      execute: async (_toolCallId, params: { machines: string[]; snapshot: string }, signal) => {
+        const machines = await leases.snapshot(workspaceId, params.machines, params.snapshot, waitMs, signal);
+        return result(`Saved snapshot ${params.snapshot} of ${listed(params.machines)}.\n${machines.map(describeMachine).join("\n")}`, { machines });
       },
     })),
     registerWorkspaceAgentTool("restore_machines", (workspaceId) => defineWorkspaceTool({

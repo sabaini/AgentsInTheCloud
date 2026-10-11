@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import { AgentsInTheCloudCoreError, createKeyedOperationQueue, readTextIfExists, writeJsonAtomic } from "@agents-in-the-cloud/core";
 import { errorMessage } from "@agents-in-the-cloud/shared";
 import { machineImageServers, type WorkspaceTemplateMachineProfile } from "@agents-in-the-cloud/workspace-templates";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { LxdRequestError, sameLxdLocation, type LxdClient, type LxdInstance, type LxdInstanceDetails, type LxdInstancesPost } from "../lxd/index.ts";
+import { lxdVersionKeepsSnapshots, machineDnsDomain, machineNetworkAcl, machineNetworkAclRules, projectSandbox, workspaceNetworkConfig, workspaceNetworkName, workspaceNetworkSecurity } from "./sandbox.ts";
 
 const leaseSchema = Type.Object({
   name: Type.String(),
@@ -33,7 +35,7 @@ const leaseSchema = Type.Object({
 const leaseStoreSchema = Type.Object({ leases: Type.Array(leaseSchema) });
 export type MachineLease = Static<typeof leaseSchema>;
 
-export type MachineLxd = Pick<LxdClient, "location" | "instances" | "instance" | "profileDevices" | "createBlockVolume" | "deleteVolume" | "createVolumeSnapshot" | "restoreVolumeSnapshot" | "createInstance" | "setInstanceState" | "deleteInstance" | "readInstanceFile" | "run" | "details" | "snapshots" | "createSnapshot" | "restoreSnapshot">;
+export type MachineLxd = Pick<LxdClient, "location" | "server" | "projectConfig" | "network" | "createNetwork" | "updateNetwork" | "deleteNetwork" | "networkAcl" | "createNetworkAcl" | "updateNetworkAcl" | "instances" | "instance" | "profileDevices" | "createBlockVolume" | "deleteVolume" | "createVolumeSnapshot" | "restoreVolumeSnapshot" | "createInstance" | "setInstanceState" | "deleteInstance" | "readInstanceFile" | "run" | "details" | "snapshots" | "createSnapshot" | "restoreSnapshot">;
 
 export interface MachineSettings {
   profiles: WorkspaceTemplateMachineProfile[];
@@ -56,7 +58,7 @@ export interface MachineLeaseDependencies<Lxd extends MachineLxd = MachineLxd> {
 }
 
 /** An interrupted machine didn't finish restoring, so its disks may be from different points in time; it stays stopped until a restore does. */
-export type MachineState = "creating" | "starting" | "ready" | "paused" | "stopped" | "restoring" | "interrupted" | "failed" | "missing" | "disconnected";
+export type MachineState = "creating" | "starting" | "ready" | "saving" | "stopped" | "restoring" | "interrupted" | "failed" | "missing" | "disconnected";
 
 export interface MachineView {
   name: string;
@@ -65,7 +67,9 @@ export interface MachineView {
   image: string;
   diskSizesGiB: number[];
   state: MachineState;
-  /** Where the workspace's other machines reach it, while it runs; they don't know its name. */
+  /** The name the workspace's other machines know it by; its own hostname is `name`, which they don't. */
+  dnsName: string;
+  /** Where the workspace's other machines reach it, while it runs. */
   addresses: string[];
   expiresAt: string;
   snapshots: string[];
@@ -110,19 +114,53 @@ function vendorData(name: string, publicKey: string): string {
   return `#cloud-config\nhostname: ${JSON.stringify(name)}\nmanage_etc_hosts: true\nssh_authorized_keys:\n  - ${JSON.stringify(publicKey)}\n`;
 }
 
-/** Extra disks go in the storage pool of the machine's root disk, which its LXD profiles define. */
-async function rootDiskPool(lxd: MachineLxd, profiles: string[]): Promise<string> {
-  let pool: string | undefined;
-  // Later profiles override earlier ones, as when LXD applies them.
+interface ProfileDevice { profile: string; device: Awaited<ReturnType<MachineLxd["profileDevices"]>>[string] }
+
+/** The devices a machine's LXD profiles give it, by name: a later profile's device replaces an earlier one's, as when LXD applies them. */
+async function profileDevices(lxd: MachineLxd, profiles: string[]): Promise<Map<string, ProfileDevice>> {
+  const devices = new Map<string, ProfileDevice>();
   for (const profile of profiles) {
-    const devices = await lxd.profileDevices(profile).catch((error: Error) => {
+    const own = await lxd.profileDevices(profile).catch((error: Error) => {
       throw isMissing(error) ? refused(`The LXD server has no profile called ${profile}. Create it there, or change the machine profile in the template's settings.`) : error;
     });
-    const root = Object.values(devices).find((device) => device.type === "disk" && device.path === "/");
-    if (root?.pool) pool = root.pool;
+    for (const [name, device] of Object.entries(own)) devices.set(name, { profile, device });
   }
+  return devices;
+}
+
+/** Extra disks go in the storage pool of the machine's root disk, which its LXD profiles define. */
+async function rootDiskPool(lxd: MachineLxd, profiles: string[]): Promise<string> {
+  const pool = [...(await profileDevices(lxd, profiles)).values()].find(({ device }) => device.type === "disk" && device.path === "/")?.device.pool;
   if (!pool) throw refused(`None of the LXD profiles ${profiles.join(", ")} gives machines a root disk, so there's no storage pool for their extra disks`);
   return pool;
+}
+
+/** Keeps the ACL of machine networks as `egress-policy.ts` says, also when that has changed or someone edited it. */
+async function applyNetworkAcl(lxd: MachineLxd): Promise<void> {
+  const rules = machineNetworkAclRules();
+  try {
+    const current = await lxd.networkAcl(machineNetworkAcl);
+    if (!isDeepStrictEqual(current, { egress: rules.egress, ingress: rules.ingress })) await lxd.updateNetworkAcl(machineNetworkAcl, rules);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+    await lxd.createNetworkAcl(machineNetworkAcl, rules);
+  }
+}
+
+/**
+ * Deletes the workspace's network once none of its machines are left in the project, so idle workspaces hold no uplink
+ * address. `leases` are the ones it has now, which may still be creating their instances.
+ */
+export async function removeUnusedNetwork(lxd: MachineLxd, workspaceId: string, leases: MachineLease[]): Promise<void> {
+  if (leases.some((lease) => sameLxdLocation(lease.location, lxd.location))) return;
+  const network = workspaceNetworkName(workspaceId);
+  try {
+    // Machines AITC lost track of may still use it.
+    if ((await lxd.network(network)).usedBy.length) return;
+    await lxd.deleteNetwork(network);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
 }
 
 /** Stops the instance if it's running and deletes it with its snapshots; one that's already gone is fine. */
@@ -138,6 +176,12 @@ export async function removeInstance(lxd: MachineLxd, instance: string): Promise
   await lxd.deleteInstance(instance);
 }
 
+/** Throws the first failure among `results`, which are all settled by then. */
+function throwFirstFailure(results: PromiseSettledResult<unknown>[]): void {
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failure) throw failure.reason;
+}
+
 /** Wait for `done`, but no longer than `ms` or until the caller gives up; the work itself carries on. */
 async function within(done: Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
   const stop = new AbortController();
@@ -150,13 +194,12 @@ async function within(done: Promise<void>, ms: number, signal?: AbortSignal): Pr
   }
 }
 
-function stateOf(lease: MachineLease, instance: LxdInstance | undefined, restoring: boolean): MachineState {
+function stateOf(lease: MachineLease, instance: LxdInstance | undefined, restoring: boolean, saving: boolean): MachineState {
   if (lease.status === "restoring") return restoring ? "restoring" : "interrupted";
   if (lease.status !== "ready") return lease.status;
+  if (saving) return "saving";
   if (!instance) return "missing";
-  if (instance.status === "Running") return "ready";
-  // A snapshot pauses a machine while its disks are saved.
-  return instance.status === "Frozen" ? "paused" : "stopped";
+  return instance.status === "Running" ? "ready" : "stopped";
 }
 
 const unknownDetails: LxdInstanceDetails = { snapshots: [], addresses: [] };
@@ -169,6 +212,7 @@ function viewOf(lease: MachineLease, state: MachineState, { snapshots, addresses
     image: lease.profile.image,
     diskSizesGiB: lease.profile.diskSizesGiB,
     state,
+    dnsName: `${lease.instance}.${machineDnsDomain}`,
     addresses,
     expiresAt: new Date(lease.expiresAt).toISOString(),
     snapshots,
@@ -183,9 +227,13 @@ interface Task { controller: AbortController; done: Promise<void> }
 /** The machines each workspace leases. Store changes run one at a time per workspace; creating and booting run alongside. */
 export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDependencies<Lxd>) {
   const serialize = createKeyedOperationQueue();
+  /** Not a workspace ID, so changes to the ACL run one at a time, alongside workspaces' changes. */
+  const networkAclKey = "\0network-acl";
   const tasks = new Map<string, Task>();
   /** Machines being restored right now; a lease left restoring otherwise was interrupted. */
   const restoring = new Set<string>();
+  /** Machines shut down while a snapshot of them is saved. */
+  const saving = new Set<string>();
   /** Workspaces being deleted, which can't have new machines. */
   const closing = new Set<string>();
   const taskKey = (workspaceId: string, name: string) => `${workspaceId}\0${name}`;
@@ -290,12 +338,18 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     }
   }
 
+  /** Watches machines that were just started until they've booted, and records on each whether it did. */
+  function boot(workspaceId: string, names: string[], lxd: MachineLxd): Task[] {
+    return names.map((name) => start(workspaceId, name, (signal) => failOnError(workspaceId, name, signal, () => becomeReady(workspaceId, name, lxd, signal))));
+  }
+
   async function provision(workspaceId: string, name: string, signal: AbortSignal): Promise<void> {
     await failOnError(workspaceId, name, signal, async () => {
       const lease = await find(workspaceId, name);
       const lxd = await lxdFor(lease);
       const sizes = lease.profile.diskSizesGiB;
-      let devices: Record<string, Record<string, string>> = {};
+      // This replaces any eth0 the machine's LXD profiles have.
+      const devices: NonNullable<LxdInstancesPost["devices"]> = { eth0: { type: "nic", name: "eth0", network: workspaceNetworkName(workspaceId) } };
       if (sizes.length) {
         const pool = await rootDiskPool(lxd, lease.profile.lxdProfiles);
         const volumes = sizes.map((_, index) => `${lease.instance}-disk${index + 1}`);
@@ -305,7 +359,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
           stored.volumes = volumes;
         });
         for (const [index, size] of sizes.entries()) await lxd.createBlockVolume(pool, volumes[index]!, `${size}GiB`);
-        devices = Object.fromEntries(volumes.map((volume, index) => [`disk${index + 1}`, { type: "disk", pool, source: volume }]));
+        for (const [index, volume] of volumes.entries()) devices[`disk${index + 1}`] = { type: "disk", pool, source: volume };
       }
       const config: NonNullable<LxdInstancesPost["config"]> = { "user.aitc.workspace": workspaceId, "user.aitc.lease": name, "cloud-init.vendor-data": vendorData(name, await deps.publicKey(workspaceId)) };
       // MicroCloud turns stateful migration on for every VM, and then refuses extra disks from local pools. Machines never move.
@@ -350,7 +404,8 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
     return await Promise.all(leases.map(async (lease) => {
       if (!here(lease)) return viewOf(lease, "disconnected", unknownDetails);
       const instance = instances.get(lease.instance);
-      return viewOf(lease, stateOf(lease, instance, restoring.has(taskKey(workspaceId, lease.name))), instance ? await lxd.details(lease.instance) : unknownDetails);
+      const key = taskKey(workspaceId, lease.name);
+      return viewOf(lease, stateOf(lease, instance, restoring.has(key), saving.has(key)), instance ? await lxd.details(lease.instance) : unknownDetails);
     }));
   }
 
@@ -383,13 +438,30 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       if (name === "localhost") throw new AgentsInTheCloudCoreError("invalid_arguments", "A machine can't be called localhost");
       if (leases.some((lease) => lease.name === name)) throw refused(`This workspace already has a machine called ${name}`);
       if (!await deps.reachesMachines(workspaceId)) throw refused("This workspace is older than machines in AgentsInTheCloud, so ssh in it can't reach them. Ask the user to create a new workspace from its template to use machines.");
-      // Refuse before recording anything when no LXD server is connected.
-      const { location } = await connected();
+      // Refuse before recording anything when no LXD server is connected, or it can't keep machines sandboxed.
+      const lxd = await connected();
+      const { version } = await lxd.server();
+      if (!lxdVersionKeepsSnapshots(version)) throw refused(`The LXD server runs LXD ${version}, and machines need LXD 6.9 or later. Ask the user to upgrade it, or to connect another one in Settings, under Machines.`);
+      const { uplink, missing, unsafe } = projectSandbox(await lxd.projectConfig(lxd.location.project));
+      if (!uplink || missing.length || unsafe.length) throw refused(`The LXD project ${lxd.location.project} isn't set up to keep machines apart from the rest of the network, so AgentsInTheCloud won't create them there. Ask the user to look at Settings, under Machines.`);
+      // The machine's own eth0 replaces any its LXD profiles have, but another network device would get past its workspace's network.
+      const nic = [...await profileDevices(lxd, profile.lxdProfiles)].find(([key, { device }]) => key !== "eth0" && device.type === "nic");
+      if (nic) throw refused(`The LXD profile ${nic[1].profile} gives machines another network device, ${nic[0]}, which could connect them to more than their workspace's other machines. Ask the user to remove it from that profile on the LXD server, or to change the machine profile in the template's settings.`);
       await deps.publicKey(workspaceId);
+      // Shared by every workspace's network.
+      await serialize(networkAclKey, () => applyNetworkAcl(lxd));
+      const network = workspaceNetworkName(workspaceId);
+      const existing = await lxd.network(network).catch((error: Error) => {
+        if (isMissing(error)) return undefined;
+        throw error;
+      });
+      if (!existing) await lxd.createNetwork({ name: network, description: `AgentsInTheCloud machines of workspace ${workspaceId}`, type: "ovn", config: workspaceNetworkConfig(uplink) });
+      // Also when someone changed what keeps it sandboxed.
+      else if (Object.entries(workspaceNetworkSecurity).some(([key, value]) => existing.config[key] !== value)) await lxd.updateNetwork(network, workspaceNetworkSecurity);
       const now = Date.now();
       await writeLeases(workspaceId, [...leases, {
         name,
-        location,
+        location: lxd.location,
         instance: machineInstanceName(workspaceId, name),
         profile: { name: profile.name, image: profile.image, type: profile.type, lxdProfiles: profile.lxdProfiles, diskSizesGiB: profile.diskSizesGiB },
         volumes: [],
@@ -421,45 +493,51 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
   }
 
   /**
-   * Saves each machine's disks as a snapshot. Several machines are paused together while it's taken, so it holds one
-   * moment across all of them, which machines working together need to come back to.
+   * Saves each machine's disks as a snapshot. The machines shut down for it, all together, so it holds one moment across
+   * all of them, which machines working together need to come back to, with their disks clean. Ones that were running
+   * start again afterwards, and this waits up to `waitMs` for them to boot.
+   *
+   * A snapshot of a running machine can't be restored once the machine has stopped, which restoring needs: it holds the
+   * name its network device had on the LXD host, and a restricted project refuses to set that (LXD 5.21 and 6.9).
    */
-  async function snapshot(workspaceId: string, names: string[], snapshotName: string): Promise<MachineView[]> {
+  async function snapshot(workspaceId: string, names: string[], snapshotName: string, waitMs: number, signal?: AbortSignal): Promise<MachineView[]> {
     if (!snapshotNamePattern.test(snapshotName)) throw new AgentsInTheCloudCoreError("invalid_arguments", "Snapshot names use letters, digits, dots, hyphens and underscores");
-    await serialize(workspaceId, async () => {
-      const machines = named(await readLeases(workspaceId), names);
+    const booting = await serialize(workspaceId, async () => {
+      const leases = await readLeases(workspaceId);
+      const machines = named(leases, names);
       for (const lease of machines) {
         if (lease.status !== "ready") throw refused(`${lease.name} isn't ready yet, so it can't be snapshotted`);
         if ((await (await lxdFor(lease)).snapshots(lease.instance)).includes(snapshotName)) throw refused(`${lease.name} already has a snapshot called ${snapshotName}`);
       }
       const lxd = await connected();
       const running: MachineLease[] = [];
-      for (const lease of machines) if ((await lxd.instance(lease.instance)).status === "Running") running.push(lease);
-      // A snapshot holds what's on the machines' disks, so what they've only written to memory so far goes there first.
-      await Promise.all(running.map(async (lease) => {
-        const flushed = await lxd.run(lease.instance, ["sync"]);
-        if (flushed.exitCode !== 0) throw refused(`Couldn't save what ${lease.name} has written before the snapshot: ${flushed.stderr.trim()}`);
-      }));
-      // Paused, disks are saved as they were at one moment: a machine's extra disks, which have snapshots of their own, and several machines' disks.
-      const pausing = machines.length > 1 ? running : running.filter((lease) => lease.volumes.length > 0);
-      const freezes = await Promise.allSettled(pausing.map((lease) => lxd.setInstanceState(lease.instance, "freeze")));
-      const frozen = pausing.filter((_, index) => freezes[index]!.status === "fulfilled");
+      for (const lease of machines) if ((await lxd.instance(lease.instance)).status !== "Stopped") running.push(lease);
+      for (const lease of machines) saving.add(taskKey(workspaceId, lease.name));
+      let restarted: Task[] = [];
       try {
-        const refusedFreeze = freezes.find((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (refusedFreeze) throw refusedFreeze.reason;
-        if (frozen.length) await deps.changed(workspaceId, await readLeases(workspaceId));
+        await deps.changed(workspaceId, leases);
+        // When one doesn't stop, the others still do, and need starting again below.
+        throwFirstFailure(await Promise.allSettled(running.map((lease) => lxd.setInstanceState(lease.instance, "stop"))));
         for (const lease of machines) {
           // A machine's extra disks aren't part of its own snapshot. That comes last, so a listed snapshot has every disk.
           for (const volume of lease.volumes) await lxd.createVolumeSnapshot(lease.pool!, volume, snapshotName);
           await lxd.createSnapshot(lease.instance, snapshotName);
         }
       } finally {
-        const unfreezes = await Promise.allSettled(frozen.map((lease) => lxd.setInstanceState(lease.instance, "unfreeze")));
-        if (frozen.length) await deps.changed(workspaceId, await readLeases(workspaceId));
-        const refusedUnfreeze = unfreezes.find((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (refusedUnfreeze) throw refusedUnfreeze.reason;
+        for (const lease of machines) saving.delete(taskKey(workspaceId, lease.name));
+        // Also when the snapshot failed, the machines that were running carry on, watched while they boot.
+        const stopped: MachineLease[] = [];
+        for (const lease of running) if ((await lxd.instance(lease.instance)).status === "Stopped") stopped.push(lease);
+        const starts = await Promise.allSettled(stopped.map((lease) => lxd.setInstanceState(lease.instance, "start")));
+        const started = stopped.filter((_, index) => starts[index]!.status === "fulfilled");
+        for (const lease of started) lease.status = "starting";
+        await writeLeases(workspaceId, leases);
+        restarted = boot(workspaceId, started.map((lease) => lease.name), lxd);
+        throwFirstFailure(starts);
       }
+      return restarted;
     });
+    await within(Promise.all(booting.map((task) => task.done)).then(() => undefined), waitMs, signal);
     return await views(workspaceId, names);
   }
 
@@ -504,7 +582,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       }
       return lxd;
     });
-    const booting = names.map((name) => start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal))));
+    const booting = boot(workspaceId, names, lxd);
     await within(Promise.all(booting.map((task) => task.done)).then(() => undefined), waitMs, signal);
     return await views(workspaceId, names);
   }
@@ -527,7 +605,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       if (stopped.length) await writeLeases(workspaceId, leases);
       return stopped.map((lease) => lease.name);
     });
-    const booting = woken.map((name) => start(workspaceId, name, (taskSignal) => failOnError(workspaceId, name, taskSignal, () => becomeReady(workspaceId, name, lxd, taskSignal))));
+    const booting = boot(workspaceId, woken, lxd);
     if (booting.length) await within(Promise.all(booting.map((task) => task.done)).then(() => undefined), waitMs, signal);
   }
 
@@ -562,6 +640,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       for (const lease of expired) {
         await destroy(lxd, lease);
         leases = leases.filter((candidate) => candidate !== lease);
+        await removeUnusedNetwork(lxd, workspaceId, leases);
         await writeLeases(workspaceId, leases);
       }
       return expired.map((lease) => lease.name);
@@ -601,8 +680,11 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
       const leases = await readLeases(workspaceId);
       const lease = leases.find((candidate) => candidate.name === name);
       if (!lease) throw refused(`This workspace has no machine called ${name}`);
-      await destroy(await lxdFor(lease), lease);
-      await writeLeases(workspaceId, leases.filter((candidate) => candidate !== lease));
+      const lxd = await lxdFor(lease);
+      await destroy(lxd, lease);
+      const remaining = leases.filter((candidate) => candidate !== lease);
+      await removeUnusedNetwork(lxd, workspaceId, remaining);
+      await writeLeases(workspaceId, remaining);
     });
   }
 

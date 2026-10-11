@@ -1,24 +1,26 @@
 /** Exercise machines end to end through a running AgentsInTheCloud, the way a user and an Agent use them:
- * connect it to an LXD server with a restricted token, give a template a container profile, and have a
+ * connect it to an LXD server with OVN with a restricted token, give a template a container profile, and have a
  * workspace's Agent create a machine, write to it with plain ssh, and snapshot it. Parking stops the machine;
  * after unparking, the Agent wakes it with ssh and restores the snapshot. The HTTP API creates a second machine,
- * which the first reaches at the address the API reports, refuses a third and releases it, and deleting the
- * workspace asks before deleting the first. Every check looks at LXD or the API, not at what the Agent says.
- * Images the machines needed are deleted again afterwards.
+ * which the first reaches at the name and address the API reports, refuses a third and releases it, and deleting the
+ * workspace asks before deleting the first, with its network. Every check looks at LXD or the API, not at what the
+ * Agent says. Images the machines needed are deleted again afterwards.
  *
  * Needs `lxc` with admin access to the server, and an AgentsInTheCloud that isn't connected to LXD yet, with a
- * model provider. The Agent makes fewer than ten small model requests; pick a cheap model with --model.
+ * model provider. `--uplink` is the server's OVN uplink network. The Agent makes fewer than ten small model
+ * requests; pick a cheap model with --model.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
- *   bun run test:machines:functional [--atelier <url>] [--remote <lxc-remote>] [--model <provider::model>] [--image <ubuntu-release>]
+ *   bun run test:machines:functional [--atelier <url>] [--remote <lxc-remote>] [--uplink UPLINK] [--model <provider::model>] [--image <ubuntu-release>]
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import type { JsonObject } from "@agents-in-the-cloud/core";
 import { machineInstanceName } from "../src/server/leases.ts";
+import { machineNetworkAcl } from "../src/server/sandbox.ts";
 
-const { values: options } = parseArgs({ options: { atelier: { type: "string", default: "http://localhost:3000" }, remote: { type: "string" }, model: { type: "string" }, image: { type: "string", default: "24.04" } } });
+const { values: options } = parseArgs({ options: { atelier: { type: "string", default: "http://localhost:3000" }, remote: { type: "string" }, uplink: { type: "string", default: "UPLINK" }, model: { type: "string" }, image: { type: "string", default: "24.04" } } });
 const project = `aitc-ft-${randomUUID().slice(0, 8)}`;
 const on = (name: string) => options.remote ? `${options.remote}:${name}` : name;
 const server = options.remote ? [`${options.remote}:`] : [];
@@ -33,7 +35,7 @@ interface Workspace {
   phase: { kind: string; status?: string; deletion?: { status: string; fingerprint?: string } };
   agents?: { id: string; agentTypeId: string; busy: boolean }[];
 }
-interface Machine { name: string; state: string; addresses: string[]; snapshots: string[] }
+interface Machine { name: string; state: string; dnsName: string; addresses: string[]; snapshots: string[] }
 
 async function command(program: string, ...args: string[]): Promise<string> {
   const child = Bun.spawn([program, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -98,8 +100,12 @@ try {
   assert(!workspaceTemplates.some((template) => template.gitUrl === repository && template.branch === null), `AgentsInTheCloud already has a template for ${repository}, which this test would change and delete`);
 
   await step(`connect AgentsInTheCloud to the ${project} project with a restricted token, as Settings asks`, async () => {
-    await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=false");
+    const pool = await lxc("profile", "device", "get", on("default"), "root", "pool");
+    await lxc("project", "create", on(project), "-c", "features.images=false", "-c", "features.profiles=true", "-c", "features.networks=true", "-c", "restricted=true", "-c", "restricted.snapshots=allow", "-c", `restricted.networks.uplinks=${options.uplink}`);
     kept.unshift(`lxc project delete ${on(project)}`);
+    await lxc("profile", "device", "add", on("default"), "root", "disk", "path=/", `pool=${pool}`, "--project", project);
+    // AgentsInTheCloud keeps its ACL for the next machine.
+    kept.unshift(`lxc network acl delete ${on(machineNetworkAcl)} --project ${project}`);
     const token = (await lxc("config", "trust", "add", ...server, "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;
     kept.unshift(`lxc config trust revoke-token ${on(project)}`);
     await submit("/settings/machines/connect", { token });
@@ -162,13 +168,14 @@ try {
     assert.equal(await inBox("cat /root/functional"), nonce);
   });
 
-  await step("the HTTP API creates box-2, which box-1 reaches at its address, refuses a third machine, and releases box-2", async () => {
+  await step("the HTTP API creates box-2, which box-1 reaches by its name and address, refuses a third machine, and releases box-2", async () => {
     const { machine } = await api<{ machine: Machine }>("POST", `/workspaces/${workspaceId}/machines`, { profile: "box" });
     assert.deepEqual([machine.name, machine.state], ["box-2", "ready"]);
     const [address] = machine.addresses;
     const listed = (await instances("n4")).split("\n").find((line) => line.startsWith(`${machineInstanceName(workspaceId, "box-2")},`));
     assert.ok(address && listed?.includes(address), `box-2's address ${address} isn't one LXD lists: ${listed}`);
     await inBox(`nc -z -w 5 ${address} 22`);
+    await inBox(`nc -z -w 5 ${machine.dnsName} 22`);
     const third = await send("POST", `/workspaces/${workspaceId}/machines`, { profile: "box" });
     assert.equal(third.status, 409, third.text);
     assert.match(third.text, /already has 2 of its 2 machines/);
@@ -177,7 +184,7 @@ try {
     assert.equal(await instances("n"), box);
   });
 
-  await step("deleting the workspace asks first, then deletes box-1 with it", async () => {
+  await step("deleting the workspace asks first, then deletes box-1 and its network with it", async () => {
     const review = await api<{ blocked: boolean; details: { details: JsonObject }[] }>("POST", `/workspaces/${workspaceId}/delete`, {});
     assert(review.blocked && review.details.some(({ details }) => isDeepStrictEqual(details, { deleted: ["box-1"], kept: [] })), JSON.stringify(review));
     await submit(`/workspaces/${workspaceId}/delete/confirm`, { fingerprint: (await workspace()).phase.deletion!.fingerprint! });
@@ -187,6 +194,7 @@ try {
     });
     kept.shift();
     assert.equal(await instances("n"), "");
+    assert.equal(await lxc("network", "list", ...server, "--project", project, "-f", "csv"), "");
   });
 
   await step("delete the template, and disconnect, which removes AgentsInTheCloud's certificate", async () => {
@@ -197,6 +205,7 @@ try {
     kept.shift();
   });
 
+  await lxc("network", "acl", "delete", on(machineNetworkAcl), "--project", project);
   await lxc("project", "delete", on(project));
   for (const image of await pulledImages()) await lxc("image", "delete", on(image));
   console.log("passed");

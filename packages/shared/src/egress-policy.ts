@@ -14,6 +14,8 @@ import { BlockList, isIP } from "node:net";
  * This module is the one policy definition for both enforcement layers: the
  * System nftables firewall (images/system/src/firewall.ts) and the egress
  * proxy's destination check (packages/proxy-egress), so they cannot drift.
+ * Workspaces' test machines are held to it too, by the network ACL that
+ * packages/machines generates from it.
  */
 
 /** Special-purpose IPv4 ranges that are never workspace egress destinations. */
@@ -86,6 +88,31 @@ export function isWorkspaceEgressAddress(ip: string): boolean {
   if (family === 4) return !blockedIpv4.check(ip, "ipv4");
   if (family === 6) return allowedIpv6.check(ip, "ipv6") && !blockedIpv6.check(ip, "ipv6");
   return false;
+}
+
+const ipv4Number = (address: string) => address.split(".").reduce((value, octet) => value * 256 + Number(octet), 0);
+const ipv4Address = (value: number) => [24, 16, 8, 0].map(shift => Math.floor(value / 2 ** shift) % 256).join(".");
+
+/** Every IPv4 address outside the blocked ranges, as the fewest CIDR blocks, for allow lists that can't subtract ranges. */
+export function workspaceEgressIpv4AllowedCidrs(): string[] {
+  const blocked = blockedEgressIpv4Ranges.map(([address, prefix]) => [ipv4Number(address), ipv4Number(address) + 2 ** (32 - prefix)] as const).sort((a, b) => a[0] - b[0]);
+  const cidrs: string[] = [];
+  // Each step takes the largest block that starts on its own boundary and stays inside the gap.
+  const cover = (start: number, end: number) => {
+    while (start < end) {
+      let size = 1;
+      while (start % (size * 2) === 0 && start + size * 2 <= end) size *= 2;
+      cidrs.push(`${ipv4Address(start)}/${32 - Math.log2(size)}`);
+      start += size;
+    }
+  };
+  let next = 0;
+  for (const [start, end] of blocked) {
+    cover(next, start);
+    next = Math.max(next, end);
+  }
+  cover(next, 2 ** 32);
+  return cidrs;
 }
 
 /** nftables set elements for the System firewall, generated from the same list the proxy enforces. */
