@@ -101,12 +101,12 @@ export const appSettingsFrameId = "app_settings_frame";
 const disclosureSections = new Set(["models", globalWorkspaceSettingsSectionId, "host", "developer-tools"]);
 const sectionFrameId = (id: string) => `app_settings_section_${id}`;
 
-async function renderSettingsSectionFrame(id: string, resetLeftover?: string): Promise<string> {
+async function renderSettingsSectionFrame(request: Request, id: string, resetLeftover?: string): Promise<string> {
   const section = listSettingsContributions().find(contribution => contribution.id === id);
   if (!section && id !== "developer-tools") throw invalidArguments(`settings section not found: ${id}`);
   const content = id === "developer-tools"
     ? `${await renderDeveloperTools(resetLeftover)}${actionLinkHtml({ href: "/design-system-catalogue.html", variant: "secondary", content: { kind: "caption", caption: "Design system catalogue" }, attributesHtml: 'data-turbo="false"' })}${renderBuildIdentity()}`
-    : await section!.render();
+    : await section!.render({ origin: agentsInTheCloudUrl(request) });
   return `<turbo-frame class="app-settings-section-frame" id="${sectionFrameId(id)}">${disclosureSections.has(id) ? `<div class="app-settings-expanded">${content}</div>` : content}</turbo-frame>`;
 }
 
@@ -159,7 +159,7 @@ async function deleteAllStoredSettings(): Promise<string | undefined> {
 
 export async function handleSettingsPageRequest(request: Request, url: URL, options: { forceDeleteAllWorkspaces?: () => Promise<WorkspaceCleanupResult>; renderModelPickerUpdates: () => Promise<string> }): Promise<Response | undefined> {
   const sectionMatch = url.pathname.match(/^\/settings\/sections\/([^/]+)$/);
-  if (sectionMatch && request.method === "GET") return response(await renderSettingsSectionFrame(sectionMatch[1]!));
+  if (sectionMatch && request.method === "GET") return response(await renderSettingsSectionFrame(request, sectionMatch[1]!));
   if (url.pathname === "/settings" && request.method === "GET") {
     const section = url.searchParams.get("section") ?? undefined;
     if (request.headers.get("turbo-frame") === appSettingsFrameId) return response(await renderSettingsFrame(request, section));
@@ -173,7 +173,7 @@ export async function handleSettingsPageRequest(request: Request, url: URL, opti
   if (url.pathname === "/settings/reset" && request.method === "POST") {
     const leftover = await deleteAllStoredSettings();
     const pickerUpdates = await options.renderModelPickerUpdates();
-    return stream(`${pickerUpdates}${replace(appSettingsFrameId, await renderSettingsFrame(request, "developer-tools"))}${leftover ? replace(sectionFrameId("developer-tools"), await renderSettingsSectionFrame("developer-tools", leftover)) : ""}${update("onboarding_modal_host", await renderOnboardingDialog())}${remove(modelsDialogId)}`);
+    return stream(`${pickerUpdates}${replace(appSettingsFrameId, await renderSettingsFrame(request, "developer-tools"))}${leftover ? replace(sectionFrameId("developer-tools"), await renderSettingsSectionFrame(request, "developer-tools", leftover)) : ""}${update("onboarding_modal_host", await renderOnboardingDialog())}${remove(modelsDialogId)}`);
   }
   if (url.pathname === "/settings/workspaces/force-delete" && request.method === "POST" && forceDeleteWorkspacesEnabled()) {
     const result = options.forceDeleteAllWorkspaces
