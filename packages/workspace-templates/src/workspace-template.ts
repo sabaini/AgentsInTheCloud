@@ -93,13 +93,15 @@ const configurationProperties = {
 
 const configurationRecordSchema = Type.Object(configurationProperties);
 
-/** What Agents may create on the connected LXD server; CPU, memory and network come from the LXD profiles. */
+/** What Agents may create on the connected LXD server; settings it doesn't name, like the root disk, come from the LXD profiles. */
 const storedMachineProfileSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
   image: Type.String(),
   type: Type.Union([Type.Literal("virtual-machine"), Type.Literal("container")]),
   lxdProfiles: Type.Array(Type.String()),
+  cpus: Type.Number(),
+  memoryGiB: Type.Number(),
   diskSizesGiB: Type.Array(Type.Number()),
   lifetimeHours: Type.Number(),
   createdAt: Type.String(),
@@ -307,8 +309,8 @@ export type WorkspaceTemplateConfiguration = WorkspaceTemplateSummary & {
   maxMachines: number;
 };
 
-/** Templates saved before Machines existed allow this many per workspace. */
-export const defaultMaxMachines = 3;
+/** Until a template's limit is changed, its workspaces may hold this many machines. */
+export const defaultMaxMachines = 10;
 
 export function workspaceTemplateMachineProfileSummary(profile: StoredWorkspaceTemplateMachineProfile, workspaceTemplateId: string): WorkspaceTemplateMachineProfile {
   return { ...profile, workspaceTemplateId };

@@ -47,7 +47,7 @@ async function step<T>(description: string, action: () => Promise<T>): Promise<T
   return result;
 }
 
-const profile: WorkspaceTemplateMachineProfile = { id: randomUUID(), workspaceTemplateId: "t", name: "box", image: `ubuntu:${options.image}`, type: "container", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 1, createdAt: "", updatedAt: "" };
+const profile: WorkspaceTemplateMachineProfile = { id: randomUUID(), workspaceTemplateId: "t", name: "box", image: `ubuntu:${options.image}`, type: "container", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [], lifetimeHours: 1, createdAt: "", updatedAt: "" };
 /** Its second LXD profile adds a NIC on the other workspace's network. */
 const bridged: WorkspaceTemplateMachineProfile = { ...profile, id: randomUUID(), name: "bridged", lxdProfiles: ["default", "bridged"] };
 

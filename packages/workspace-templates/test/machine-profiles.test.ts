@@ -6,7 +6,7 @@ import { addWorkspaceTemplate, createWorkspaceTemplateMachineProfile, deleteWork
 import { workspaceTemplatesFile } from "../src/workspace-template.ts";
 
 type RequestFields = Record<string, string | number | string[] | number[]>;
-const node: WorkspaceTemplateMachineProfileInput = { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [20, 20, 20], lifetimeHours: 24 };
+const node: WorkspaceTemplateMachineProfileInput = { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [20, 20, 20], lifetimeHours: 24 };
 
 describe("Workspace template machine profiles", () => {
   let previousDataDir: string | undefined;
@@ -27,7 +27,7 @@ describe("Workspace template machine profiles", () => {
   });
 
   test("templates saved before Machines have no profiles and allow three machines per workspace", async () => {
-    expect(await getWorkspaceTemplateConfiguration(workspaceTemplateId)).toMatchObject({ machineProfiles: [], maxMachines: 3 });
+    expect(await getWorkspaceTemplateConfiguration(workspaceTemplateId)).toMatchObject({ machineProfiles: [], maxMachines: 10 });
   });
 
   test("profiles are saved, tidied, renamed and deleted", async () => {
@@ -56,6 +56,8 @@ describe("Workspace template machine profiles", () => {
       [{ image: "docker:ubuntu" }, "Image server docker is unknown"],
       [{ lxdProfiles: [" "] }, "at least one LXD profile"],
       [{ lxdProfiles: ["default", "bad/profile"] }, "bad/profile isn't a valid LXD profile name"],
+      [{ cpus: 0 }, "CPUs are a whole number from 1 to 128"],
+      [{ memoryGiB: 1.5 }, "Memory is whole GiB from 1 to 1024"],
       [{ type: "container" }, "Only virtual machines can have extra disks"],
       [{ diskSizesGiB: [0] }, "whole GiB"],
       [{ diskSizesGiB: [1.5] }, "whole GiB"],
@@ -93,15 +95,15 @@ describe("Workspace template machine profiles", () => {
     await expect(post("/machine-profiles", { ...node, cpu: 4 })).rejects.toThrow("needs name, image, type");
     await expect(post("/machine-profiles", { ...node, diskSizesGiB: "20" })).rejects.toThrow("needs name, image, type");
 
-    const form = await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: "default, ceph-node", diskSizesGiB: "20,20  40", lifetimeHours: "12" }, false);
+    const form = await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: "default, ceph-node", cpus: "4", memoryGiB: "8", diskSizesGiB: "20,20  40", lifetimeHours: "12" }, false);
     expect(form.status).toBe(303);
     expect(form.headers.get("location")).toBe(`http://localhost/workspace-templates/${workspaceTemplateId}/settings?section=machines&editor=${created.machineProfile.id}`);
-    expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles[0]).toMatchObject({ image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: ["default", "ceph-node"], diskSizesGiB: [20, 20, 40], lifetimeHours: 12 });
-    await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "container", lxdProfiles: "default", diskSizesGiB: "", lifetimeHours: "12" }, false);
+    expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles[0]).toMatchObject({ image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: ["default", "ceph-node"], cpus: 4, memoryGiB: 8, diskSizesGiB: [20, 20, 40], lifetimeHours: 12 });
+    await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "container", lxdProfiles: "default", cpus: "1", memoryGiB: "1", diskSizesGiB: "", lifetimeHours: "12" }, false);
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles[0]).toMatchObject({ type: "container", diskSizesGiB: [] });
     // Settings forms show the refusal next to the form instead.
-    expect((await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "laptop", lxdProfiles: "default", diskSizesGiB: "", lifetimeHours: "12" }, false)).status).toBe(422);
-    expect((await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: "default", diskSizesGiB: "20 GiB", lifetimeHours: "12" }, false)).status).toBe(422);
+    expect((await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "laptop", lxdProfiles: "default", cpus: "1", memoryGiB: "1", diskSizesGiB: "", lifetimeHours: "12" }, false)).status).toBe(422);
+    expect((await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: "default", cpus: "1", memoryGiB: "1", diskSizesGiB: "20 GiB", lifetimeHours: "12" }, false)).status).toBe(422);
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles[0]!.type).toBe("container");
 
     expect(await (await post("/max-machines", { maxMachines: 6 })).json()).toEqual({ maxMachines: 6 });

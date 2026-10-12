@@ -42,7 +42,7 @@ async function step<T>(description: string, action: () => Promise<T>): Promise<T
   return result;
 }
 
-const profile = (values: Partial<WorkspaceTemplateMachineProfile>): WorkspaceTemplateMachineProfile => ({ id: randomUUID(), workspaceTemplateId: "t", name: "node", image: `ubuntu:${options.image}`, type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 1, createdAt: "", updatedAt: "", ...values });
+const profile = (values: Partial<WorkspaceTemplateMachineProfile>): WorkspaceTemplateMachineProfile => ({ id: randomUUID(), workspaceTemplateId: "t", name: "node", image: `ubuntu:${options.image}`, type: "virtual-machine", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [], lifetimeHours: 1, createdAt: "", updatedAt: "", ...values });
 
 try {
   // The extra disks go where the root disk does: "default" on a plain LXD, "local" on MicroCloud.
@@ -66,7 +66,7 @@ try {
   const tunnels = createMachineTunnels({ usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
   const leases = createMachineLeases({
     lxd: async () => lxd,
-    machineSettings: async () => ({ profiles: [profile({ name: "node", diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
+    machineSettings: async () => ({ profiles: [profile({ name: "node", cpus: 2, memoryGiB: 2, diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
     publicKey: async () => (await readFile(`${keyPath}.pub`, "utf8")).trim(),
     reachesMachines: async () => true,
     directory: () => directory,
@@ -96,10 +96,14 @@ try {
     assert.equal(result.exitCode, 0, result.stderr);
     return result.stdout.toString().trim();
   };
-  const node = await step(`acquire a VM from ubuntu:${options.image} with 2 and 3 GiB disks, on its workspace's own network`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
+  const node = await step(`acquire a VM from ubuntu:${options.image} with 2 CPUs, 2 GiB of memory and 2 and 3 GiB disks, on its workspace's own network`, () => leases.acquire(workspaceId, { profile: "node" }, 10 * 60_000));
   assert.equal(node.state, "ready", JSON.stringify(node));
   assert.equal((await lxd.network(network)).config["security.acls"], machineNetworkAcl);
-  await step("its disks, hostname and authorized key are in place", async () => {
+  await step("its CPUs, memory, disks, hostname and authorized key are in place", async () => {
+    assert.equal(await run("nproc"), "2");
+    // The kernel keeps some of it for itself.
+    const memoryKiB = Number(await run("awk '/MemTotal/{print $2}' /proc/meminfo"));
+    assert(memoryKiB > 1.5 * 1024 ** 2 && memoryKiB <= 2 * 1024 ** 2, `MemTotal is ${memoryKiB} kB`);
     assert.deepEqual((await run("lsblk -dn -b -o SIZE,TYPE -e7 | awk '$2==\"disk\"{print $1}' | sort -n")).split("\n").map(Number).slice(0, 2), [2 * 1024 ** 3, 3 * 1024 ** 3]);
     assert.equal(await run("hostname"), "node-1");
     assert((await run("cat /home/ubuntu/.ssh/authorized_keys")).includes("aitc integration"));

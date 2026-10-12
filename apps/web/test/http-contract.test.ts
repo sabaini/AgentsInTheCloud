@@ -272,7 +272,7 @@ describe("HTTP contracts", () => {
     await registry.seed([]);
     const workspaceTemplate = (await addWorkspaceTemplate("https://github.com/org/machines.git")).workspaceTemplate;
     const path = `/workspace-templates/${workspaceTemplate.id}/machine-profiles/missing`;
-    const updated = await app.fetch(postJson(path, { name: "node", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 24 }));
+    const updated = await app.fetch(postJson(path, { name: "node", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [], lifetimeHours: 24 }));
     expect(updated.status).toBe(404);
     expect(await updated.json()).toMatchObject({ error: { code: "workspace_template_machine_profile_not_found" } });
     expect((await app.fetch(postJson(`${path}/delete`, {}))).status).toBe(404);

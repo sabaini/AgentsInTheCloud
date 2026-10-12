@@ -17,7 +17,7 @@ beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "machines-lifecycle-"));
   process.env.ATELIER_DATA_DIR = dataDir;
   lxd = new FakeLxd();
-  const lease = { name: "node-1", location: lxd.location, instance: "node-1-aaaa", profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status: "ready", hostKeys: [] };
+  const lease = { name: "node-1", location: lxd.location, instance: "node-1-aaaa", profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status: "ready", hostKeys: [] };
   await mkdir(join(dataDir, "machines", "workspaces", "w1"), { recursive: true });
   await writeFile(join(dataDir, "machines", "workspaces", "w1", "leases.json"), JSON.stringify({ leases: [lease] }));
   const source = { type: "image" as const, alias: "24.04" };
@@ -40,7 +40,7 @@ test("deleting a workspace with machines asks first, naming the ones that go wit
 
   const server = await createLxdClientCredentials("lxd.test");
   await saveLxdConnection({ server: { address: "lxd.test:8443", certificate: server.certificate }, project: "agents-in-the-cloud", credentials: await createLxdClientCredentials("aitc") });
-  const lease = (name: string, fingerprint: string) => ({ name, location: { address: "lxd.test:8443", fingerprint, project: "agents-in-the-cloud" }, instance: `${name}-cccc`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status: "ready", hostKeys: [] });
+  const lease = (name: string, fingerprint: string) => ({ name, location: { address: "lxd.test:8443", fingerprint, project: "agents-in-the-cloud" }, instance: `${name}-cccc`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status: "ready", hostKeys: [] });
   await mkdir(join(dataDir, "machines", "workspaces", "w3"), { recursive: true });
   await writeFile(join(dataDir, "machines", "workspaces", "w3", "leases.json"), JSON.stringify({ leases: [lease("here", certificateFingerprint(server.certificate)), lease("elsewhere", "b2")] }));
   const review = await machinesDeletionReview.inspect("w3");

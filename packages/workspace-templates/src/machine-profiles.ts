@@ -16,10 +16,14 @@ export interface WorkspaceTemplateMachineProfileInput {
   image: string;
   type: MachineType;
   lxdProfiles: string[];
+  cpus: number;
+  memoryGiB: number;
   diskSizesGiB: number[];
   lifetimeHours: number;
 }
 
+const maxCpus = 128;
+const maxMemoryGiB = 1_024;
 const maxDisks = 16;
 const maxDiskSizeGiB = 16_384;
 const maxLifetimeHours = 720;
@@ -44,11 +48,13 @@ function normalizeProfile(input: WorkspaceTemplateMachineProfileInput): Workspac
   if (!lxdProfiles.length) throw invalid("Add at least one LXD profile, such as default");
   const invalidProfile = lxdProfiles.find((profile) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile));
   if (invalidProfile) throw invalid(`${invalidProfile} isn't a valid LXD profile name`);
-  if (input.type === "container" && input.diskSizesGiB.length) throw invalid("Only virtual machines can have extra disks");
+  if (!wholeNumberIn(input.cpus, 1, maxCpus)) throw invalid(`CPUs are a whole number from 1 to ${maxCpus}`);
+  if (!wholeNumberIn(input.memoryGiB, 1, maxMemoryGiB)) throw invalid(`Memory is whole GiB from 1 to ${maxMemoryGiB}`);
+  if (input.type === "container" && input.diskSizesGiB.length) throw invalid("Only virtual machines can have extra disks. Leave Extra disks empty for a container");
   if (input.diskSizesGiB.length > maxDisks) throw invalid(`A profile can have up to ${maxDisks} extra disks`);
   if (!input.diskSizesGiB.every((size) => wholeNumberIn(size, 1, maxDiskSizeGiB))) throw invalid(`Disk sizes are whole GiB from 1 to ${maxDiskSizeGiB}`);
   if (!wholeNumberIn(input.lifetimeHours, 1, maxLifetimeHours)) throw invalid(`Machines can last from 1 to ${maxLifetimeHours} hours`);
-  return { name, image, type: input.type, lxdProfiles, diskSizesGiB: [...input.diskSizesGiB], lifetimeHours: input.lifetimeHours };
+  return { name, image, type: input.type, lxdProfiles, cpus: input.cpus, memoryGiB: input.memoryGiB, diskSizesGiB: [...input.diskSizesGiB], lifetimeHours: input.lifetimeHours };
 }
 
 function findProfile(workspaceTemplate: WorkspaceTemplateRecord, profileId: string): StoredWorkspaceTemplateMachineProfile {
