@@ -10,9 +10,13 @@ function kind(type: MachineView["type"]): string {
   return type === "virtual-machine" ? "virtual machine" : "container";
 }
 
+function resources({ cpus, memoryGiB }: { cpus: number; memoryGiB: number }): string {
+  return `${cpus} ${cpus === 1 ? "CPU" : "CPUs"} and ${memoryGiB} GiB of memory`;
+}
+
 function describeMachine(machine: MachineView): string {
-  const disks = machine.diskSizesGiB.length ? ` with ${machine.diskSizesGiB.length === 1 ? "an extra disk" : `${machine.diskSizesGiB.length} extra disks`} (${machine.diskSizesGiB.join(", ")} GiB)` : "";
-  const what = `a ${kind(machine.type)} from ${machine.image}${disks}, made from profile ${machine.profile}, until ${machine.expiresAt}`;
+  const disks = machine.diskSizesGiB.length ? ` and ${machine.diskSizesGiB.length === 1 ? "an extra disk" : `${machine.diskSizesGiB.length} extra disks`} (${machine.diskSizesGiB.join(", ")} GiB)` : "";
+  const what = `a ${kind(machine.type)} from ${machine.image} with ${resources(machine)}${disks}, made from profile ${machine.profile}, until ${machine.expiresAt}`;
   const snapshots = machine.snapshots.length ? ` Snapshots: ${machine.snapshots.join(", ")}.` : "";
   const addresses = machine.addresses.length ? ` Other machines reach it as ${machine.dnsName} or at ${machine.addresses.join(" or ")}, not as ${machine.name}.` : "";
   switch (machine.state) {
@@ -31,7 +35,7 @@ function describeMachine(machine: MachineView): string {
 
 function describeProfiles({ profiles, maxMachines }: MachineSettings): string {
   if (!profiles.length) return "This workspace's template has no machine profiles yet, so no machines can be created. The user can add profiles in the template's settings, under Machines.";
-  const lines = profiles.map((profile) => `- ${profile.name}: a ${kind(profile.type)} from ${profile.image}${profile.diskSizesGiB.length ? ` with extra disks of ${profile.diskSizesGiB.join(", ")} GiB` : ""}, kept for ${profile.lifetimeHours} hours`);
+  const lines = profiles.map((profile) => `- ${profile.name}: a ${kind(profile.type)} from ${profile.image} with ${resources(profile)}${profile.diskSizesGiB.length ? ` and extra disks of ${profile.diskSizesGiB.join(", ")} GiB` : ""}, kept for ${profile.lifetimeHours} hours`);
   return `Profiles you can create machines from (up to ${maxMachines} at once):\n${lines.join("\n")}`;
 }
 

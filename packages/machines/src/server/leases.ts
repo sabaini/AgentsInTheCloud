@@ -21,6 +21,8 @@ const leaseSchema = Type.Object({
     image: Type.String(),
     type: Type.Union([Type.Literal("virtual-machine"), Type.Literal("container")]),
     lxdProfiles: Type.Array(Type.String()),
+    cpus: Type.Number(),
+    memoryGiB: Type.Number(),
     diskSizesGiB: Type.Array(Type.Number()),
   }),
   pool: Type.Optional(Type.String()),
@@ -65,6 +67,8 @@ export interface MachineView {
   profile: string;
   type: MachineLease["profile"]["type"];
   image: string;
+  cpus: number;
+  memoryGiB: number;
   diskSizesGiB: number[];
   state: MachineState;
   /** The name the workspace's other machines know it by; its own hostname is `name`, which they don't. */
@@ -210,6 +214,8 @@ function viewOf(lease: MachineLease, state: MachineState, { snapshots, addresses
     profile: lease.profile.name,
     type: lease.profile.type,
     image: lease.profile.image,
+    cpus: lease.profile.cpus,
+    memoryGiB: lease.profile.memoryGiB,
     diskSizesGiB: lease.profile.diskSizesGiB,
     state,
     dnsName: `${lease.instance}.${machineDnsDomain}`,
@@ -361,7 +367,13 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
         for (const [index, size] of sizes.entries()) await lxd.createBlockVolume(pool, volumes[index]!, `${size}GiB`);
         for (const [index, volume] of volumes.entries()) devices[`disk${index + 1}`] = { type: "disk", pool, source: volume };
       }
-      const config: NonNullable<LxdInstancesPost["config"]> = { "user.aitc.workspace": workspaceId, "user.aitc.lease": name, "cloud-init.vendor-data": vendorData(name, await deps.publicKey(workspaceId)) };
+      const config: NonNullable<LxdInstancesPost["config"]> = {
+        "user.aitc.workspace": workspaceId,
+        "user.aitc.lease": name,
+        "cloud-init.vendor-data": vendorData(name, await deps.publicKey(workspaceId)),
+        "limits.cpu": String(lease.profile.cpus),
+        "limits.memory": `${lease.profile.memoryGiB}GiB`,
+      };
       // MicroCloud turns stateful migration on for every VM, and then refuses extra disks from local pools. Machines never move.
       if (lease.profile.type === "virtual-machine") config["migration.stateful"] = "false";
       await lxd.createInstance({
@@ -463,7 +475,7 @@ export function createMachineLeases<Lxd extends MachineLxd>(deps: MachineLeaseDe
         name,
         location: lxd.location,
         instance: machineInstanceName(workspaceId, name),
-        profile: { name: profile.name, image: profile.image, type: profile.type, lxdProfiles: profile.lxdProfiles, diskSizesGiB: profile.diskSizesGiB },
+        profile: { name: profile.name, image: profile.image, type: profile.type, lxdProfiles: profile.lxdProfiles, cpus: profile.cpus, memoryGiB: profile.memoryGiB, diskSizesGiB: profile.diskSizesGiB },
         volumes: [],
         createdAt: now,
         expiresAt: now + profile.lifetimeHours * 3_600_000,

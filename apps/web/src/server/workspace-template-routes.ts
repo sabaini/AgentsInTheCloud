@@ -33,6 +33,8 @@ const machineProfileInputSchema = Type.Object({
   image: Type.String(),
   type: machineTypeSchema,
   lxdProfiles: Type.Array(Type.String()),
+  cpus: Type.Number(),
+  memoryGiB: Type.Number(),
   diskSizesGiB: Type.Array(Type.Number()),
   lifetimeHours: Type.Number(),
 }, { additionalProperties: false });
@@ -257,7 +259,7 @@ export function createWorkspaceTemplateRoutes(deps: {
   async function workspaceTemplateMachineProfileValues(request: Request): Promise<WorkspaceTemplateMachineProfileInput> {
     if (requestAcceptsJson(request)) {
       const body = await readJsonObject(request);
-      if (!Value.Check(machineProfileInputSchema, body)) throw invalidArguments("A machine profile needs name, image, type, lxdProfiles, diskSizesGiB and lifetimeHours");
+      if (!Value.Check(machineProfileInputSchema, body)) throw invalidArguments("A machine profile needs name, image, type, lxdProfiles, cpus, memoryGiB, diskSizesGiB and lifetimeHours");
       return body;
     }
     const formData = await request.formData();
@@ -269,6 +271,8 @@ export function createWorkspaceTemplateRoutes(deps: {
       image: String(formData.get("image") ?? ""),
       type,
       lxdProfiles: list("lxdProfiles"),
+      cpus: Number(formData.get("cpus") ?? ""),
+      memoryGiB: Number(formData.get("memoryGiB") ?? ""),
       diskSizesGiB: list("diskSizesGiB").map(Number),
       lifetimeHours: Number(formData.get("lifetimeHours") ?? ""),
     };

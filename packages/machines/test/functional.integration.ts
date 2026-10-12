@@ -118,7 +118,7 @@ try {
   const templateId = await step("give a template a container profile and at most 2 machines per workspace", async () => {
     const { workspaceTemplate } = await api<{ workspaceTemplate: { id: string } }>("POST", "/workspace-templates", { gitUrl: repository });
     kept.unshift(`delete the template ${workspaceTemplate.id} in AgentsInTheCloud`);
-    await api("POST", `/workspace-templates/${workspaceTemplate.id}/machine-profiles`, { name: "box", image: `ubuntu:${options.image}`, type: "container", lxdProfiles: ["default"], diskSizesGiB: [], lifetimeHours: 1 });
+    await api("POST", `/workspace-templates/${workspaceTemplate.id}/machine-profiles`, { name: "box", image: `ubuntu:${options.image}`, type: "container", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [], lifetimeHours: 1 });
     await api("POST", `/workspace-templates/${workspaceTemplate.id}/max-machines`, { maxMachines: 2 });
     return workspaceTemplate.id;
   });

@@ -49,7 +49,7 @@ test("a machine gets its disks in its root disk's pool, the workspace key, and w
     source: { alias: "24.04", server: "https://cloud-images.ubuntu.com/releases", protocol: "simplestreams" },
     profiles: ["default", "ceph-node"],
     devices: { disk1: { type: "disk", pool: "fast", source: `${instance.name}-disk1` } },
-    config: { "user.aitc.workspace": "w1", "user.aitc.lease": "node-1", "migration.stateful": "false" },
+    config: { "user.aitc.workspace": "w1", "user.aitc.lease": "node-1", "limits.cpu": "2", "limits.memory": "4GiB", "migration.stateful": "false" },
   });
   expect(instance.config["cloud-init.vendor-data"]).toBe('#cloud-config\nhostname: "node-1"\nmanage_etc_hosts: true\nssh_authorized_keys:\n  - "ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace w1"\n');
   const stored = JSON.parse(await readFile(join(directory, "w1", "leases.json"), "utf8"));
@@ -187,7 +187,7 @@ test("releasing a booting machine stops waiting for it and deletes it with its d
 });
 
 test("after a restart, machines that were booting carry on and ones never created are marked failed", async () => {
-  const lease = (name: string, status: string) => ({ name, location: lxd.location, instance: machineInstanceName("w1", name), profile: { name: "client", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status, hostKeys: [] });
+  const lease = (name: string, status: string) => ({ name, location: lxd.location, instance: machineInstanceName("w1", name), profile: { name: "client", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status, hostKeys: [] });
   await mkdir(join(directory, "w1"), { recursive: true });
   await writeFile(join(directory, "w1", "leases.json"), JSON.stringify({ leases: [lease("booting", "starting"), lease("lost", "creating")] }));
   await lxd.createInstance({ name: machineInstanceName("w1", "booting"), type: "container", source: { type: "image", alias: "24.04" } });

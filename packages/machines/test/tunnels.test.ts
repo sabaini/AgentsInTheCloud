@@ -29,7 +29,7 @@ const lxd: MachineTunnelLxd = {
   },
 };
 
-const lease = (name: string, status: MachineLease["status"]): MachineLease => ({ name, location: { address: "lxd.test:8443", fingerprint: "a1", project: "agents-in-the-cloud" }, instance: `${name}-abcd1234`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: 0, status, hostKeys: [`ssh-ed25519 AAAA${name}`] });
+const lease = (name: string, status: MachineLease["status"]): MachineLease => ({ name, location: { address: "lxd.test:8443", fingerprint: "a1", project: "agents-in-the-cloud" }, instance: `${name}-abcd1234`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: 0, status, hostKeys: [`ssh-ed25519 AAAA${name}`] });
 
 beforeAll(async () => {
   sshd = createServer((socket: Socket) => socket.pipe(socket)).listen(0, "127.0.0.1");

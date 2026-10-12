@@ -151,5 +151,5 @@ export class FakeLxd implements MachineLxd {
   }
 }
 
-export const nodeProfile: WorkspaceTemplateMachineProfile = { id: "p1", workspaceTemplateId: "t", name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default", "ceph-node"], diskSizesGiB: [20, 20, 20], lifetimeHours: 24, createdAt: "", updatedAt: "" };
-export const clientProfile: WorkspaceTemplateMachineProfile = { ...nodeProfile, id: "p2", name: "client", type: "container", lxdProfiles: ["default"], diskSizesGiB: [] };
+export const nodeProfile: WorkspaceTemplateMachineProfile = { id: "p1", workspaceTemplateId: "t", name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default", "ceph-node"], cpus: 2, memoryGiB: 4, diskSizesGiB: [20, 20, 20], lifetimeHours: 24, createdAt: "", updatedAt: "" };
+export const clientProfile: WorkspaceTemplateMachineProfile = { ...nodeProfile, id: "p2", name: "client", type: "container", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [] };

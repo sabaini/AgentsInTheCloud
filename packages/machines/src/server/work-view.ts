@@ -55,7 +55,7 @@ function machineRow(workspaceId: string, machine: MachineView): string {
     <span class="managed-list__visual" aria-hidden="true">${Icons.Server}</span>
     <div class="managed-list__content">
       <div class="managed-list__label"><span class="managed-list__label-text">${escapeHtml(machine.name)}</span></div>
-      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image}${disks} · ${remaining(machine.expiresAt)}`)}</div>
+      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image} · ${machine.cpus} ${machine.cpus === 1 ? "CPU" : "CPUs"}, ${machine.memoryGiB} GiB${disks} · ${remaining(machine.expiresAt)}`)}</div>
       <div class="managed-list__description">${status}</div>
     </div>
     <div class="managed-list__actions">${terminal}${release}</div>
@@ -110,7 +110,7 @@ export const machineRoutes: WorkspaceModuleRouteHandler = {
       const workspaceId = params[0]!;
       if (request.method === "GET" && requestAcceptsJson(request)) {
         const [machines, { profiles, maxMachines }] = await Promise.all([machineLeases.list(workspaceId), machineLeases.settings(workspaceId)]);
-        return jsonResponse({ machines, profiles: profiles.map(({ name, image, type, diskSizesGiB, lifetimeHours }) => ({ name, image, type, diskSizesGiB, lifetimeHours })), maxMachines });
+        return jsonResponse({ machines, profiles: profiles.map(({ name, image, type, cpus, memoryGiB, diskSizesGiB, lifetimeHours }) => ({ name, image, type, cpus, memoryGiB, diskSizesGiB, lifetimeHours })), maxMachines });
       }
       if (request.method === "POST") {
         const body: JsonObject = await readJsonObject(request);
