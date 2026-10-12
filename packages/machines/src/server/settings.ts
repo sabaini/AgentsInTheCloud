@@ -1,8 +1,10 @@
 import { AgentsInTheCloudCoreError } from "@agents-in-the-cloud/core";
 import { buttonHtml } from "@agents-in-the-cloud/design-system/button";
+import { copyButtonHtml } from "@agents-in-the-cloud/design-system/copy-button";
 import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/destructive-confirmation";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type SettingsContribution } from "@agents-in-the-cloud/shared";
+import { textResponse } from "@agents-in-the-cloud/shared/http";
 import { createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
 import { disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
 import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
@@ -12,6 +14,8 @@ const sectionId = "settings-sec-machines";
 const connectPath = "/settings/machines/connect";
 const disconnectPath = "/settings/machines/disconnect";
 const deleteUntrackedPath = "/settings/machines/untracked/delete";
+const setupScriptPath = "/settings/machines/setup-lxd-host.sh";
+const setupScript = new URL("../../setup-lxd-host.sh", import.meta.url);
 const suggestedProject = "agents-in-the-cloud";
 const statusTimeoutMs = 5_000;
 
@@ -30,9 +34,22 @@ function row(label: string, contentHtml: string, actionsHtml = ""): string {
   </div></div>`;
 }
 
-function renderConnectForm(message: string): string {
+/** A server can't fetch the script from a loopback address, so then it's downloaded and copied over instead. */
+function renderSetup(origin: string): string {
+  const { hostname } = new URL(origin);
+  if (hostname === "localhost" || hostname === "[::1]" || hostname.startsWith("127.")) {
+    return `<p>On a fresh Ubuntu server, <a class="settings-link" href="${setupScriptPath}" download>this script</a> sets up LXD and OVN for them. Copy it there and run it with <code>sudo bash setup-lxd-host.sh</code>.</p>`;
+  }
+  const command = `curl -fsSL ${origin}${setupScriptPath} | sudo bash`;
+  return `<p>On a fresh Ubuntu server, this sets up LXD and OVN for them:</p>
+    <div class="machines-setup-command"><pre class="settings-command">${escapeHtml(command)}</pre>${copyButtonHtml({ label: "Copy command", copyText: command })}</div>`;
+}
+
+function renderConnectForm(origin: string, message: string): string {
   return row("LXD", `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
-    <p>Give Agents their own test machines on a server with LXD 6.9 or later and OVN, like a MicroCloud, for work that needs real disks, its own kernel or several machines. On that server, run:</p>
+    <p>Give Agents their own test machines on a server of yours, for work that needs real disks, its own kernel or several machines.</p>
+    ${renderSetup(origin)}
+    <p>If the server already has LXD 6.9 or later and OVN, like a MicroCloud, run this instead:</p>
     <pre class="settings-command">lxc project create ${suggestedProject} \\
   -c features.profiles=true -c features.networks=true \\
   -c restricted=true -c restricted.snapshots=allow \\
@@ -41,7 +58,7 @@ lxc profile device add default root disk path=/ \\
   pool=local --project ${suggestedProject}
 lxc config trust add --name ${suggestedProject} \\
   --restricted --projects ${suggestedProject}</pre>
-    <p>${notOnMicroCloud} Then paste the token the last command prints. AgentsInTheCloud can only use that project, and keeps each workspace’s machines on a network of their own.</p>
+    <p>${notOnMicroCloud} Either way, you get a token to paste here. AgentsInTheCloud can only use the project it’s for, and keeps each workspace’s machines on a network of their own.</p>
     ${message ? `<p class="settings-error">${escapeHtml(message)}</p>` : ""}
     <div class="machines-connect__controls">
       <input class="settings-input text-field" type="password" name="token" aria-label="LXD trust token" placeholder="Paste the trust token" autocomplete="off" data-1p-ignore required>
@@ -115,48 +132,49 @@ async function renderConnection(connection: LxdConnection, message: string): Pro
   }
 }
 
-async function renderMachinesSettings(message = ""): Promise<string> {
+async function renderMachinesSettings(origin: string, message = ""): Promise<string> {
   const connection = await readLxdConnection();
-  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${connection ? await renderConnection(connection, message) : renderConnectForm(message)}</section>`;
+  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${connection ? await renderConnection(connection, message) : renderConnectForm(origin, message)}</section>`;
 }
 
-async function connect(request: Request): Promise<string> {
+async function connect(request: Request, origin: string): Promise<string> {
   // A second submit from a stale page must not trust another certificate.
-  if (await readLxdConnection()) return await renderMachinesSettings();
+  if (await readLxdConnection()) return await renderMachinesSettings(origin);
   const token = String((await request.formData()).get("token") ?? "");
   try {
     const credentials = await createLxdClientCredentials(suggestedProject);
     const { server, project } = await joinLxdServer(token, credentials);
     await saveLxdConnection({ server, project, credentials });
-    return await renderMachinesSettings();
+    return await renderMachinesSettings(origin);
   } catch (error) {
-    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(error.message);
+    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(origin, error.message);
     throw error;
   }
 }
 
-async function deleteUntracked(request: Request): Promise<string> {
+async function deleteUntracked(request: Request, origin: string): Promise<string> {
   const connection = await readLxdConnection();
-  if (!connection) return await renderMachinesSettings();
+  if (!connection) return await renderMachinesSettings(origin);
   try {
     await deleteUntrackedMachine(new LxdClient(connection), String((await request.formData()).get("name") ?? ""));
   } catch (error) {
-    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(error.message);
+    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(origin, error.message);
     throw error;
   }
-  return await renderMachinesSettings();
+  return await renderMachinesSettings(origin);
 }
 
 export const machinesSettingsContribution: SettingsContribution = {
   id: "machines",
   label: "Machines",
   order: 50,
-  render: () => renderMachinesSettings(),
-  async handleAction({ request, url }) {
+  render: ({ origin }) => renderMachinesSettings(origin),
+  async handleAction({ request, url, origin }) {
+    if (request.method === "GET" && url.pathname === setupScriptPath) return textResponse(await Bun.file(setupScript).text());
     if (request.method !== "POST") return undefined;
-    if (url.pathname === connectPath) return turboStreamResponse(turboStream("replace", sectionId, await connect(request)));
-    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await renderMachinesSettings(await disconnectLxd())));
-    if (url.pathname === deleteUntrackedPath) return turboStreamResponse(turboStream("replace", sectionId, await deleteUntracked(request)));
+    if (url.pathname === connectPath) return turboStreamResponse(turboStream("replace", sectionId, await connect(request, origin)));
+    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await renderMachinesSettings(origin, await disconnectLxd())));
+    if (url.pathname === deleteUntrackedPath) return turboStreamResponse(turboStream("replace", sectionId, await deleteUntracked(request, origin)));
     return undefined;
   },
 };

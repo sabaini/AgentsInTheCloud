@@ -1,6 +1,7 @@
 import { handleConnectionModeSettings } from "./connection-mode.ts";
 import { handleGitHubSettingsRequest } from "./github.ts";
 import { handleModelsRequest } from "@agents-in-the-cloud/llm/server";
+import { agentsInTheCloudUrl } from "@agents-in-the-cloud/proxy-ingress";
 import { finishOnboarding } from "../onboarding/state.ts";
 import { handleSettingsPageRequest, type WorkspaceCleanupResult } from "./page.ts";
 import { listSettingsContributions } from "./registry.ts";
@@ -19,7 +20,7 @@ export async function handleSettingsRequest(
   if (response) return response;
 
   for (const contribution of listSettingsContributions()) {
-    const handled = await contribution.handleAction?.({ request, url });
+    const handled = await contribution.handleAction?.({ request, url, origin: agentsInTheCloudUrl(request) });
     if (handled) return handled;
   }
   return undefined;

@@ -5,6 +5,9 @@
 .machines-connect p { margin: 0; }
 /* Copyable shell commands read better scrolled than wrapped mid-argument. */
 .machines-connect .settings-command { overflow-x: auto; white-space: pre; }
+/* One line to copy, so it wraps rather than hiding its end. */
+.machines-setup-command { display: flex; align-items: center; gap: 8px; margin: 8px 0 12px; }
+.machines-setup-command .settings-command { flex: 1; min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .machines-connect__controls { display: flex; align-items: center; gap: 8px; }
 .machines-connect__controls .text-field { min-width: 0; flex: 1; }
 .machines-untracked, .workspace-deletion-machines { display: grid; gap: 8px; }
