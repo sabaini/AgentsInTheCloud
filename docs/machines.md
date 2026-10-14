@@ -15,10 +15,10 @@ Open **Settings › Machines**. It shows two ways to get a trust token from the 
 
 ### A fresh Ubuntu server
 
-One command sets up everything. Settings shows it with your AgentsInTheCloud's address filled in:
+One command sets up everything. Settings shows it too:
 
 ```sh
-curl -fsSL http://<AgentsInTheCloud>/settings/machines/setup-lxd-host.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/sabaini/AgentsInTheCloud/machines-ovn/packages/machines/setup-lxd-host.sh | sudo bash
 ```
 
 It installs LXD 6 and MicroOVN, then makes:
@@ -33,8 +33,6 @@ To put machines on a disk of their own, name it: add `-s -- --disk /dev/nvme1n1`
 Running it again is safe. It keeps what's already there and prints a new token.
 
 Virtual machines need hardware virtualization on the server, which shows up as `/dev/kvm`. Without it, only containers work.
-
-If you open AgentsInTheCloud at a `localhost` address, the server can't fetch the script from there. Settings then offers it as a download instead: copy it to the server and run `sudo bash setup-lxd-host.sh`.
 
 ### A server with LXD and OVN already
 
