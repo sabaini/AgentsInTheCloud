@@ -3,8 +3,8 @@
 # pool, a NAT bridge that's the uplink for OVN networks, and a sandboxed project with a trust token for it. Running it
 # again keeps what's there and prints a new token.
 #
-#   curl -fsSL <AgentsInTheCloud URL>/settings/machines/setup-lxd-host.sh | sudo bash
-#   curl -fsSL <AgentsInTheCloud URL>/settings/machines/setup-lxd-host.sh | sudo bash -s -- --disk /dev/nvme1n1
+#   curl -fsSL https://raw.githubusercontent.com/sabaini/AgentsInTheCloud/machines-ovn/packages/machines/setup-lxd-host.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/sabaini/AgentsInTheCloud/machines-ovn/packages/machines/setup-lxd-host.sh | sudo bash -s -- --disk /dev/nvme1n1
 set -Eeuo pipefail
 
 project=agents-in-the-cloud
