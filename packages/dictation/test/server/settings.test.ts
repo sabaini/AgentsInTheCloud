@@ -54,7 +54,6 @@ describe("Dictation settings", () => {
     const response = await dictationSettingsContribution.handleAction!({
       request: new Request("http://agents-in-the-cloud/settings/dictation-model", { method: "POST", body: form }),
       url: new URL("http://agents-in-the-cloud/settings/dictation-model"),
-      origin: "http://agents-in-the-cloud",
     });
     expect(response?.headers.get("content-type")).toContain("text/vnd.turbo-stream.html");
     expect(await readDictationModel()).toBe("nemotron-3.5");

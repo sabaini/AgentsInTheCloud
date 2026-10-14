@@ -73,11 +73,11 @@ A machine profile describes one kind of machine your Agents may create. Profiles
 | **Image** | `ubuntu:24.04` by default. Images from `ubuntu-daily:` and `images:` work too, and so does the alias of an image already on the LXD server. The image needs cloud-init and openssh-server, which Ubuntu's images have. |
 | **Type** | **Virtual machine** gets its own kernel and can have extra disks. **Container** starts faster and shares the server's kernel. |
 | **CPUs** and **Memory (GiB)** | 2 CPUs and 2 GiB unless you change them. |
-| **Extra disks (GiB)** | Empty block devices, one per size: one 4 GiB disk unless you change it. `20, 20, 20` gives three disks, for example for Ceph OSDs. Containers can't have them, so clear the field for a container. |
+| **Extra disks (GiB)** | Empty block devices, one per size: `20, 20, 20` gives three disks, for example for Ceph OSDs. A virtual machine gets one 4 GiB disk unless you change it. Containers can't have them, so a container gets none. |
 | **LXD profiles** | The profiles on the LXD server that machines are made with, `default` to start with. The root disk comes from them. |
 | **Delete after (hours)** | How long a machine lasts: 24 hours unless you change it, and up to 30 days. It's deleted after that, with its disks and snapshots. |
 
-**Machines per workspace** sets how many machines one workspace can have at once, 10 unless you change it.
+**Machines per workspace** sets how many machines one workspace can have at once: 10 unless you change it, and up to 20.
 
 Changes apply to machines created afterwards. Machines that already exist keep what they were created with.
 
@@ -91,7 +91,7 @@ Ask your Agent in plain words, like "Make three nodes and set up a Ceph cluster 
 | --- | --- |
 | `acquire_machine` | Creates a machine from a profile and waits until it has booted. |
 | `list_machines` | Lists the workspace's machines and the profiles it can create more from. |
-| `wait_for_machine` | Waits for a machine that's still booting. |
+| `wait_for_machine` | Waits for a machine that's still booting, and starts one that's stopped. |
 | `snapshot_machines` | Saves a snapshot of one or more machines. |
 | `restore_machines` | Puts one or more machines back to a snapshot. |
 | `release_machine` | Deletes a machine, with its disks and snapshots. |
@@ -137,9 +137,11 @@ If you delete a workspace while its LXD server isn't connected, its machines sta
 
 **"No new machines until the server runs LXD 6.9 or later."** Upgrade LXD on the server. On a snap install, run `snap refresh lxd --channel=6/stable`.
 
-**"No new machines until this project keeps them apart from the rest of the network."** The project is missing a setting that keeps machines sandboxed, or has one that would give them the LXD server. Settings shows the commands that fix it. Some settings can only be changed while the project is empty. If LXD says so, start over with a new project: **Disconnect**, run the commands above with another project name, and connect that one.
+**"No new machines until this project keeps them apart from the rest of the network."** The project is missing a setting that keeps machines sandboxed, or has one that would give them control of the LXD server. Settings shows the commands that fix it. Some settings can only be changed while the project is empty. If LXD says so, start over with a new project: **Disconnect**, run the commands above with another project name, and connect that one.
 
-**A machine "didn't finish booting".** Its image probably lacks cloud-init or openssh-server. Try an Ubuntu image.
+**A machine "didn't finish booting".** Its image probably lacks cloud-init. Try an Ubuntu image.
+
+**A machine "has no SSH host keys".** Its image lacks openssh-server. Try an Ubuntu image.
 
 **A machine is "Stopped, as restoring it didn't finish".** Its disks may be from different points in time. Ask your Agent to restore it again, or release it.
 

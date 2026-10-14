@@ -125,13 +125,16 @@ export class LxdServerClient {
     return url;
   }
 
-  protected async send(method: string, path: string, body?: LxdRequestBody, query?: Record<string, string>, signal?: AbortSignal): Promise<Response> {
+  /** `waits` is for LXD's operation waits, which send nothing until the operation ends, however long that takes. */
+  protected async send(method: string, path: string, { body, query, signal, waits = false }: { body?: LxdRequestBody; query?: Record<string, string>; signal?: AbortSignal; waits?: boolean } = {}): Promise<Response> {
     return await fetch(this.url(path, query), {
       method,
       signal,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       tls: lxdFetchTls(this.identity),
+      // Otherwise Bun gives up on a request that's silent for 5 minutes; true keeps that.
+      timeout: !waits,
     });
   }
 
@@ -145,11 +148,11 @@ export class LxdServerClient {
   }
 
   protected async get<T extends TSchema>(schema: T, path: string, query?: Record<string, string>): Promise<Static<T>> {
-    return await this.receive(schema, await this.send("GET", path, undefined, query), `GET ${path}`);
+    return await this.receive(schema, await this.send("GET", path, { query }), `GET ${path}`);
   }
 
   protected async waitFor<T extends TSchema>(schema: T, operation: string, what: string): Promise<Static<T>> {
-    return await this.receive(schema, await this.send("GET", `${operation}/wait`, undefined, { timeout: "-1" }), `${what} (waiting)`);
+    return await this.receive(schema, await this.send("GET", `${operation}/wait`, { query: { timeout: "-1" }, waits: true }), `${what} (waiting)`);
   }
 
   protected succeeded(result: LxdOperationResult, what: string): void {
@@ -157,9 +160,9 @@ export class LxdServerClient {
   }
 
   /** Make a change, waiting for its operation when LXD runs it in the background. */
-  protected async perform(method: string, path: string, body?: LxdRequestBody): Promise<void> {
+  protected async perform(method: string, path: string, body?: LxdRequestBody, signal?: AbortSignal): Promise<void> {
     const what = `${method} ${path}`;
-    const response = await this.receive(changeResponse, await this.send(method, path, body), what);
+    const response = await this.receive(changeResponse, await this.send(method, path, { body, signal }), what);
     if (response.type === "async") this.succeeded((await this.waitFor(changeFinished, response.operation, what)).metadata, what);
   }
 
@@ -183,8 +186,8 @@ export class LxdServerClient {
   }
 
   /** Stop LXD from trusting AITC's certificate. Restricted certificates may remove themselves. */
-  async removeOwnCertificate(): Promise<void> {
-    await this.perform("DELETE", this.ownCertificatePath());
+  async removeOwnCertificate(signal?: AbortSignal): Promise<void> {
+    await this.perform("DELETE", this.ownCertificatePath(), undefined, signal);
   }
 
   async projectConfig(project: string): Promise<Record<string, string>> {
@@ -269,7 +272,7 @@ export class LxdClient extends LxdServerClient {
 
   /** The file's contents, or undefined if it doesn't exist (yet). A VM's files come through its LXD agent, which may not be running. */
   async readInstanceFile(instance: string, path: string, signal?: AbortSignal): Promise<Buffer | undefined> {
-    const response = await this.send("GET", `/1.0/instances/${name(instance)}/files`, undefined, { path }, signal);
+    const response = await this.send("GET", `/1.0/instances/${name(instance)}/files`, { query: { path }, signal });
     if (response.ok) return Buffer.from(await response.arrayBuffer());
     if (response.status === 404) return undefined;
     // Every other status carries an error envelope, which receive throws.
@@ -327,7 +330,7 @@ export class LxdClient extends LxdServerClient {
   async exec(instance: string, command: string[], environment: Record<string, string> = {}): Promise<LxdExecProcess> {
     const what = `exec in ${instance}`;
     const path = `/1.0/instances/${name(instance)}/exec`;
-    const started = await this.receive(execStarted, await this.send("POST", path, { command, environment, interactive: false, "wait-for-websocket": true, "record-output": false }), what);
+    const started = await this.receive(execStarted, await this.send("POST", path, { body: { command, environment, interactive: false, "wait-for-websocket": true, "record-output": false } }), what);
     const { fds } = started.metadata.metadata;
     // LXD starts the command only once every stream is connected.
     const connecting = await Promise.allSettled([fds.control, fds["0"], fds["1"], fds["2"]].map(secret => LxdWebSocket.connect(this.connection, this.url(`${started.operation}/websocket`, { secret }))));

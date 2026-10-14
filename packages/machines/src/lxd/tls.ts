@@ -40,8 +40,10 @@ export function lxdFetchTls(identity: LxdTlsIdentity): BunFetchRequestInitTLS & 
 }
 
 function endpoint(address: string) {
-  const url = new URL(`https://${address}`);
-  return { host: url.hostname.replace(/^\[(.*)\]$/, "$1"), port: Number(url.port || 8443) };
+  // Not through URL, which drops 443 as the default port of https.
+  const parts = /^(?:\[([^\]]+)\]|([^:]+))(?::(\d+))?$/.exec(address);
+  if (!parts) throw new AgentsInTheCloudCoreError("lxd_unreachable", `${address} isn't an LXD server address`);
+  return { host: parts[1] ?? parts[2]!, port: Number(parts[3] ?? 8443) };
 }
 
 /** Open a TLS connection and return it with the certificate the server presented. */
@@ -57,7 +59,8 @@ export function connectLxd(address: string, credentials?: LxdClientCredentials, 
 }
 
 /** Bun's WebSocket cannot skip hostname verification, so exec streams use sockets pinned here. */
-export async function connectPinnedLxd(identity: LxdTlsIdentity, address = identity.server.address): Promise<TLSSocket> {
+export async function connectPinnedLxd(identity: LxdTlsIdentity): Promise<TLSSocket> {
+  const { address } = identity.server;
   const { socket, certificate } = await connectLxd(address, identity.credentials);
   if (certificateFingerprint(certificate) !== certificateFingerprint(identity.server.certificate)) {
     socket.destroy();

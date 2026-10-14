@@ -2,11 +2,13 @@ import { AgentsInTheCloudCoreError, invalidArguments, readJsonObject, requestAcc
 import { buttonHtml } from "@agents-in-the-cloud/design-system/button";
 import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/destructive-confirmation";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
+import { warningBannerHtml } from "@agents-in-the-cloud/design-system/warning-banner";
 import { domId, errorMessage, escapeHtml, turboStream, turboStreamResponse, type WorkspaceAttachment, type WorkspaceModuleCommandHandler, type WorkspaceModuleRouteHandler, type WorkspaceModuleWorkViewAdapter } from "@agents-in-the-cloud/shared";
 import { jsonResponse, matchRoute, wantsStream } from "@agents-in-the-cloud/shared/http";
 import { createWorkspaceTerminal } from "@agents-in-the-cloud/workspace-terminal/server/workspace-terminals";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { answeredInTime, readLxdConnection } from "./connection.ts";
 import type { MachineView } from "./leases.ts";
 import { machineLeases, templateMachineSettings } from "./runtime.ts";
 
@@ -31,9 +33,16 @@ const states = {
 
 const errorTarget = (workspaceId: string) => domId("machines_view_error", workspaceId);
 
+function errorBanner(workspaceId: string, title: string, message: string): string {
+  return warningBannerHtml({ title, message, role: "alert", dismiss: { action: `/workspaces/${encodeURIComponent(workspaceId)}/machines/dismiss-error`, state: "" } });
+}
+
 function remaining(expiresAt: string): string {
-  const minutes = Math.max(0, Math.round((Date.parse(expiresAt) - Date.now()) / 60_000));
-  return minutes < 90 ? `${minutes} min left` : `${Math.round(minutes / 60)} h left`;
+  const minutes = Math.round((Date.parse(expiresAt) - Date.now()) / 60_000);
+  // The next sweep deletes it.
+  if (minutes <= 0) return "time’s up";
+  if (minutes < 90) return `${minutes} min left`;
+  return minutes < 48 * 60 ? `${Math.round(minutes / 60)} h left` : `${Math.round(minutes / (24 * 60))} days left`;
 }
 
 function machineRow(workspaceId: string, machine: MachineView): string {
@@ -45,7 +54,8 @@ function machineRow(workspaceId: string, machine: MachineView): string {
   const terminal = machine.state === "ready" || machine.state === "stopped"
     ? `<form method="post" action="${path}/terminal" data-turbo="true">${buttonHtml({ type: "submit", variant: "secondary", content: { kind: "caption", caption: "Open terminal", iconHtml: Icons.Terminal } })}</form>`
     : "";
-  const release = `<form method="post" action="${path}/release" data-turbo="true">${destructiveConfirmationHtml({
+  // Releasing one needs its LXD server.
+  const release = machine.state === "disconnected" ? "" : `<form method="post" action="${path}/release" data-turbo="true">${destructiveConfirmationHtml({
     id: domId("release_machine", workspaceId, machine.name),
     trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Release" } },
     confirmCaption: `Release ${machine.name}`,
@@ -55,7 +65,7 @@ function machineRow(workspaceId: string, machine: MachineView): string {
     <span class="managed-list__visual" aria-hidden="true">${Icons.Server}</span>
     <div class="managed-list__content">
       <div class="managed-list__label"><span class="managed-list__label-text">${escapeHtml(machine.name)}</span></div>
-      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image} · ${machine.cpus} ${machine.cpus === 1 ? "CPU" : "CPUs"}, ${machine.memoryGiB} GiB${disks} · ${remaining(machine.expiresAt)}`)}</div>
+      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image} · ${machine.cpus} ${machine.cpus === 1 ? "CPU" : "CPUs"}, ${machine.memoryGiB} GiB memory${disks} · ${remaining(machine.expiresAt)}`)}</div>
       <div class="managed-list__description">${status}</div>
     </div>
     <div class="managed-list__actions">${terminal}${release}</div>
@@ -65,13 +75,15 @@ function machineRow(workspaceId: string, machine: MachineView): string {
 async function renderMachinesView(workspaceId: string): Promise<string> {
   let body: string;
   try {
-    const [machines, { profiles }] = await Promise.all([machineLeases.list(workspaceId), machineLeases.settings(workspaceId)]);
-    const empty = profiles.length
-      ? `No machines yet. Agents create them from this template’s profiles: ${profiles.map((profile) => profile.name).join(", ")}.`
-      : "This template has no machine profiles yet. Add some in its settings, under Machines.";
+    const [machines, { profiles }, connection] = await answeredInTime(Promise.all([machineLeases.list(workspaceId), machineLeases.settings(workspaceId), readLxdConnection()]));
+    const empty = !profiles.length
+      ? "This template has no machine profiles yet. Add some in its settings, under Machines."
+      : !connection
+        ? "No machines yet. Connect an LXD server in Settings, under Machines, so Agents can create them."
+        : `No machines yet. Agents create them from this template’s profiles: ${profiles.map((profile) => profile.name).join(", ")}.`;
     body = machines.length ? `<div class="managed-list">${machines.map((machine) => machineRow(workspaceId, machine)).join("")}</div>` : `<p>${escapeHtml(empty)}</p>`;
   } catch (error) {
-    body = `<p>${escapeHtml(errorMessage(error))}</p>`;
+    body = `<p>${escapeHtml(`Can’t reach the LXD server right now: ${errorMessage(error)}`)}</p>`;
   }
   return `<div class="machines-view"><div id="${errorTarget(workspaceId)}"></div>${body}</div>`;
 }
@@ -127,7 +139,7 @@ export const machineRoutes: WorkspaceModuleRouteHandler = {
       try {
         await machineLeases.release(workspaceId, name);
       } catch (error) {
-        return turboStreamResponse(turboStream("update", errorTarget(workspaceId), `<p class="machines-view__error" role="alert">${escapeHtml(`Couldn’t release ${name}: ${errorMessage(error)}`)}</p>`));
+        return turboStreamResponse(turboStream("update", errorTarget(workspaceId), errorBanner(workspaceId, `Couldn’t release ${name}`, errorMessage(error))));
       }
       // Releasing changes the leases, which refreshes the view.
       return turboStreamResponse("");
@@ -138,9 +150,12 @@ export const machineRoutes: WorkspaceModuleRouteHandler = {
       try {
         terminalId = (await createWorkspaceTerminal(workspaceId, { title: name, command: `ssh ${await existingMachine(workspaceId, name)}` })).id;
       } catch (error) {
-        return turboStreamResponse(turboStream("update", errorTarget(workspaceId), `<p class="machines-view__error" role="alert">${escapeHtml(`Couldn’t open a terminal on ${name}: ${errorMessage(error)}`)}</p>`));
+        return turboStreamResponse(turboStream("update", errorTarget(workspaceId), errorBanner(workspaceId, `Couldn’t open a terminal on ${name}`, errorMessage(error))));
       }
       return await context.openWorkView(workspaceId, { type: "terminal", terminalId });
+    }
+    if ((params = matchRoute(url, /^\/workspaces\/([^/]+)\/machines\/dismiss-error$/)) && request.method === "POST") {
+      return turboStreamResponse(turboStream("update", errorTarget(params[0]!), ""));
     }
     return undefined;
   },

@@ -26,7 +26,7 @@ describe("Workspace template machine profiles", () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  test("templates saved before Machines have no profiles and allow three machines per workspace", async () => {
+  test("templates saved before Machines have no profiles and allow ten machines per workspace", async () => {
     expect(await getWorkspaceTemplateConfiguration(workspaceTemplateId)).toMatchObject({ machineProfiles: [], maxMachines: 10 });
   });
 
@@ -52,7 +52,7 @@ describe("Workspace template machine profiles", () => {
     const refusals: [Partial<WorkspaceTemplateMachineProfileInput>, string][] = [
       [{ name: "Node" }, "lowercase letters"],
       [{ name: "" }, "lowercase letters"],
-      [{ image: "ubuntu 24.04" }, "must look like ubuntu:24.04"],
+      [{ image: "ubuntu 24.04" }, "Use an image like ubuntu:24.04"],
       [{ image: "docker:ubuntu" }, "Image server docker is unknown"],
       [{ lxdProfiles: [" "] }, "at least one LXD profile"],
       [{ lxdProfiles: ["default", "bad/profile"] }, "bad/profile isn't a valid LXD profile name"],
@@ -62,8 +62,8 @@ describe("Workspace template machine profiles", () => {
       [{ diskSizesGiB: [0] }, "whole GiB"],
       [{ diskSizesGiB: [1.5] }, "whole GiB"],
       [{ diskSizesGiB: Array.from({ length: 17 }, () => 1) }, "up to 16 extra disks"],
-      [{ lifetimeHours: 0 }, "from 1 to 720 hours"],
-      [{ lifetimeHours: Number.NaN }, "from 1 to 720 hours"],
+      [{ lifetimeHours: 0 }, "hours from 1 to 720"],
+      [{ lifetimeHours: Number.NaN }, "hours from 1 to 720"],
     ];
     for (const [change, message] of refusals) await expect(createWorkspaceTemplateMachineProfile(workspaceTemplateId, { ...node, ...change })).rejects.toThrow(message);
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles).toEqual([]);
@@ -77,9 +77,11 @@ describe("Workspace template machine profiles", () => {
   });
 
   test("the HTTP API accepts JSON and settings forms", async () => {
+    let invalidations = 0;
     const routes = createWorkspaceTemplateRoutes({
       referencingWorkspaces: () => [],
-      invalidatePresentation: () => { throw new Error("machine settings must not invalidate existing workspaces"); },
+      // Profiles decide whether workspaces offer their Machines view; the limit only matters for new machines.
+      invalidatePresentation: () => { invalidations++; },
       createAgentWorkspace: async () => new Response(),
     });
     const post = async (path: string, body: RequestFields, json = true) => {
@@ -106,9 +108,12 @@ describe("Workspace template machine profiles", () => {
     expect((await post(`/machine-profiles/${created.machineProfile.id}`, { name: "node", image: "ubuntu:26.04", type: "virtual-machine", lxdProfiles: "default", cpus: "1", memoryGiB: "1", diskSizesGiB: "20 GiB", lifetimeHours: "12" }, false)).status).toBe(422);
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles[0]!.type).toBe("container");
 
+    const profileInvalidations = invalidations;
+    expect(profileInvalidations).toBeGreaterThan(0);
     expect(await (await post("/max-machines", { maxMachines: 6 })).json()).toEqual({ maxMachines: 6 });
     expect((await post("/max-machines", { maxMachines: "4" }, false)).headers.get("location")).toEndWith("settings?section=machines&editor=limit");
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).maxMachines).toBe(4);
+    expect(invalidations).toBe(profileInvalidations);
 
     expect(await (await post(`/machine-profiles/${created.machineProfile.id}/delete`, {})).json()).toMatchObject({ deleted: true, machineProfile: { id: created.machineProfile.id } });
     expect((await getWorkspaceTemplateConfiguration(workspaceTemplateId)).machineProfiles).toEqual([]);

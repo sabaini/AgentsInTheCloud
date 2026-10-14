@@ -5,7 +5,7 @@ import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type SettingsContribution } from "@agents-in-the-cloud/shared";
 import { createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
-import { disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
+import { answeredInTime, disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
 import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
 import { lxdVersionKeepsSnapshots, projectSandbox } from "./sandbox.ts";
 
@@ -15,10 +15,9 @@ const disconnectPath = "/settings/machines/disconnect";
 const deleteUntrackedPath = "/settings/machines/untracked/delete";
 const setupScriptUrl = "https://raw.githubusercontent.com/sabaini/AgentsInTheCloud/machines-ovn/packages/machines/setup-lxd-host.sh";
 const suggestedProject = "agents-in-the-cloud";
-const statusTimeoutMs = 5_000;
 
 const limitLabels: [key: string, label: (value: string) => string][] = [
-  ["limits.instances", value => `${value} instances`],
+  ["limits.instances", value => `${value} machines`],
   ["limits.cpu", value => `${value} CPUs`],
   ["limits.memory", value => `${value} memory`],
   ["limits.disk", value => `${value} disk`],
@@ -36,8 +35,8 @@ const setupCommand = `curl -fsSL ${setupScriptUrl} | sudo bash`;
 
 function renderConnectForm(message: string): string {
   return row("LXD", `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
-    <p>Give Agents their own test machines on a server of yours, for work that needs real disks, its own kernel or several machines.</p>
-    <p>On a fresh Ubuntu server, this sets up LXD and OVN for them:</p>
+    <p>Give Agents their own test machines on a server of yours, for work that needs real disks, a kernel of its own, or several machines.</p>
+    <p>On a fresh Ubuntu server, this command sets up LXD and OVN:</p>
     <div class="machines-setup-command"><pre class="settings-command">${escapeHtml(setupCommand)}</pre>${copyButtonHtml({ label: "Copy command", copyText: setupCommand })}</div>
     <p>If the server already has LXD 6.9 or later and OVN, like a MicroCloud, run this instead:</p>
     <pre class="settings-command">lxc project create ${suggestedProject} \\
@@ -102,11 +101,8 @@ async function renderConnection(connection: LxdConnection, message: string): Pro
   const where = `${connection.project} project at ${connection.server.address}`;
   const notice = message ? `<p class="settings-error">${escapeHtml(message)}</p>` : "";
   const lxd = new LxdServerClient(connection);
-  // A server behind a dropped route would otherwise keep Settings loading for minutes.
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${statusTimeoutMs / 1000} seconds`)), statusTimeoutMs); });
   try {
-    const [server, config, untracked] = await Promise.race([Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]), deadline]);
+    const [server, config, untracked] = await answeredInTime(Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]));
     const limits = limitLabels.flatMap(([key, label]) => config[key] ? [label(config[key])] : []);
     const upgrade = lxdVersionKeepsSnapshots(server.version) ? "" : `<div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> No new machines until the server runs LXD 6.9 or later. On a snap install, run <code>snap refresh lxd --channel=6/stable</code> there.</div>`;
     const fixes = sandboxFixes(connection.project, config);
@@ -116,9 +112,7 @@ async function renderConnection(connection: LxdConnection, message: string): Pro
       <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>${upgrade}${sandbox}`, disconnect) + notice + renderUntracked(untracked);
   } catch (error) {
     return row("LXD", `<div class="managed-list__description">${escapeHtml(where)}</div>
-      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can't reach it right now: ${errorMessage(error)}`)}</div>`, disconnect) + notice;
-  } finally {
-    clearTimeout(timer);
+      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can’t reach it right now: ${errorMessage(error)}`)}</div>`, disconnect) + notice;
   }
 }
 

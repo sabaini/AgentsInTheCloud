@@ -36,6 +36,8 @@ function encodeFrame(code: number, payload: Uint8Array): Buffer {
 export class LxdWebSocket {
   private buffered: Buffer;
   private closeSent = false;
+  /** LXD pings a stream it's done with just before it drops the connection, and the pong may then take the socket down. */
+  private lastWasPing = false;
 
   private constructor(private readonly socket: TLSSocket, private readonly chunks: AsyncIterator<Buffer>, rest: Buffer) {
     this.buffered = rest;
@@ -43,8 +45,9 @@ export class LxdWebSocket {
     socket.on("error", () => {});
   }
 
+  /** `url` is on the server `identity` names, which it may give without its port. */
   static async connect(identity: LxdTlsIdentity, url: URL): Promise<LxdWebSocket> {
-    const socket = await connectPinnedLxd(identity, url.host);
+    const socket = await connectPinnedLxd(identity);
     const key = randomBytes(16).toString("base64");
     socket.write(`GET ${url.pathname}${url.search} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     const chunks: AsyncIterator<Buffer> = socket[Symbol.asyncIterator]();
@@ -70,7 +73,14 @@ export class LxdWebSocket {
 
   private async fill(length: number): Promise<boolean> {
     while (this.buffered.length < length) {
-      const next = await this.chunks.next();
+      let next: IteratorResult<Buffer>;
+      try {
+        next = await this.chunks.next();
+      } catch (error) {
+        // Only right after a ping is a dropped connection the end of the stream.
+        if (this.lastWasPing) return false;
+        throw error;
+      }
       if (next.done) return false;
       this.buffered = Buffer.concat([this.buffered, next.value]);
     }
@@ -111,28 +121,34 @@ export class LxdWebSocket {
   }
 
   /**
-   * Pongs and close replies don't wait and can't fail: LXD may have dropped the connection already,
-   * as it does when a command can't start, and then nobody is left to answer.
+   * Pongs and close replies don't wait: LXD may have dropped the connection already, as it does when a command can't
+   * start or a stream is done, and then nobody is left to answer. A reply that fails then ends the reading too.
    */
   private answer(frame: Buffer): void {
     if (!this.socket.readableEnded) this.socket.write(frame);
   }
 
-  /** Data and text messages, in order, until the server closes the stream. */
+  /** Data and text messages, in order, until the server closes the stream. A reader that stops early releases it. */
   async *messages(): AsyncGenerator<Buffer> {
     let fragments: Buffer[] = [];
-    for (let frame = await this.readFrame(); frame; frame = await this.readFrame()) {
-      if (frame.code === opcode.ping) this.answer(encodeFrame(opcode.pong, frame.payload));
-      else if (frame.code === opcode.close) {
-        this.close();
-        return;
-      } else if (frame.code === opcode.text || frame.code === opcode.binary || frame.code === opcode.continuation) {
-        fragments.push(frame.payload);
-        if (frame.fin) {
-          yield Buffer.concat(fragments);
-          fragments = [];
-        }
-      } else if (frame.code !== opcode.pong) throw failure(`unexpected WebSocket opcode ${frame.code}`);
+    try {
+      for (let frame = await this.readFrame(); frame; frame = await this.readFrame()) {
+        this.lastWasPing = frame.code === opcode.ping;
+        if (frame.code === opcode.ping) this.answer(encodeFrame(opcode.pong, frame.payload));
+        else if (frame.code === opcode.close) {
+          this.close();
+          return;
+        } else if (frame.code === opcode.text || frame.code === opcode.binary || frame.code === opcode.continuation) {
+          fragments.push(frame.payload);
+          if (frame.fin) {
+            yield Buffer.concat(fragments);
+            fragments = [];
+          }
+        } else if (frame.code !== opcode.pong) throw failure(`unexpected WebSocket opcode ${frame.code}`);
+      }
+    } finally {
+      // A close reply is still on its way out.
+      if (!this.closeSent) this.destroy();
     }
   }
 
@@ -150,7 +166,7 @@ export class LxdWebSocket {
     this.socket.end();
   }
 
-  /** Release the connection once its operation has finished, whether or not it was read. */
+  /** Release the connection, as for exec stdin once its operation has finished. */
   destroy(): void {
     this.socket.destroy();
   }

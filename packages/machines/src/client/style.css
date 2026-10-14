@@ -1,4 +1,6 @@
 .settings-sec-machines .managed-list { margin-top: 12px; }
+/* Warnings say what to run on the server, so they need reading in full. */
+.settings-sec-machines .managed-list__description { white-space: normal; }
 .settings-sec-machines .managed-list__item:has(.machines-connect) { align-items: flex-start; padding: 12px; }
 .machines-provider-icon { display: inline-flex; color: var(--text); }
 .machines-connect { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -15,7 +17,6 @@
 .machines-untracked p, .workspace-deletion-machines p { margin: 0; }
 .machines-view { box-sizing: border-box; height: 100%; overflow: auto; display: grid; align-content: start; gap: 12px; padding: 16px; }
 .machines-view p { margin: 0; }
-.machines-view__error { color: var(--danger); }
 /* Details and errors need reading in full, and on a phone the actions move under them. */
 .machines-view .managed-list__description { white-space: normal; }
 .machines-view .managed-list__item { flex-wrap: wrap; padding-block: 8px; }

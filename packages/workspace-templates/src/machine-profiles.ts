@@ -39,10 +39,10 @@ function wholeNumberIn(value: number, min: number, max: number): boolean {
 
 function normalizeProfile(input: WorkspaceTemplateMachineProfileInput): WorkspaceTemplateMachineProfileInput {
   const name = input.name.trim();
-  if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) throw invalid("Profile names use lowercase letters, digits and hyphens, and start with a letter");
+  if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) throw invalid("Profile names use lowercase letters, digits and hyphens, start with a letter, and have up to 31 characters");
   const image = input.image.trim();
   const imageParts = /^(?:([a-z-]+):)?([A-Za-z0-9][A-Za-z0-9._/-]*)$/.exec(image);
-  if (!imageParts) throw invalid("Image must look like ubuntu:24.04");
+  if (!imageParts) throw invalid("Use an image like ubuntu:24.04, or the alias of an image on the LXD server");
   if (imageParts[1] !== undefined && !Object.hasOwn(machineImageServers, imageParts[1])) throw invalid(`Image server ${imageParts[1]} is unknown. Use ${Object.keys(machineImageServers).join(", ")}, or an image alias on the LXD server`);
   const lxdProfiles = [...new Set(input.lxdProfiles.map((profile) => profile.trim()).filter(Boolean))];
   if (!lxdProfiles.length) throw invalid("Add at least one LXD profile, such as default");
@@ -53,7 +53,7 @@ function normalizeProfile(input: WorkspaceTemplateMachineProfileInput): Workspac
   if (input.type === "container" && input.diskSizesGiB.length) throw invalid("Only virtual machines can have extra disks. Leave Extra disks empty for a container");
   if (input.diskSizesGiB.length > maxDisks) throw invalid(`A profile can have up to ${maxDisks} extra disks`);
   if (!input.diskSizesGiB.every((size) => wholeNumberIn(size, 1, maxDiskSizeGiB))) throw invalid(`Disk sizes are whole GiB from 1 to ${maxDiskSizeGiB}`);
-  if (!wholeNumberIn(input.lifetimeHours, 1, maxLifetimeHours)) throw invalid(`Machines can last from 1 to ${maxLifetimeHours} hours`);
+  if (!wholeNumberIn(input.lifetimeHours, 1, maxLifetimeHours)) throw invalid(`Delete after is a whole number of hours from 1 to ${maxLifetimeHours}`);
   return { name, image, type: input.type, lxdProfiles, cpus: input.cpus, memoryGiB: input.memoryGiB, diskSizesGiB: [...input.diskSizesGiB], lifetimeHours: input.lifetimeHours };
 }
 
@@ -102,7 +102,7 @@ export async function deleteWorkspaceTemplateMachineProfile(workspaceTemplateId:
 
 /** How many machines one workspace may hold at once. */
 export async function setWorkspaceTemplateMaxMachines(workspaceTemplateId: string, maxMachines: number, file = workspaceTemplatesFile()): Promise<{ maxMachines: number }> {
-  if (!wholeNumberIn(maxMachines, 1, maxMachinesLimit)) throw invalid(`Machines per workspace must be a whole number from 1 to ${maxMachinesLimit}`);
+  if (!wholeNumberIn(maxMachines, 1, maxMachinesLimit)) throw invalid(`Machines per workspace is a whole number from 1 to ${maxMachinesLimit}`);
   return await updateWorkspaceTemplateStore(file, (store) => {
     findWorkspaceTemplateRecord(store, workspaceTemplateId).maxMachines = maxMachines;
     return { maxMachines };

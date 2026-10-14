@@ -147,11 +147,14 @@ export function createWorkspaceTemplateRoutes(deps: {
 
   type WorkspaceTemplateSettingsResult = { workspaceTemplate: WorkspaceTemplateSummary } | { machineProfile: WorkspaceTemplateMachineProfile; deleted?: true } | { maxMachines: number };
 
-  /** Refresh workspace warnings, except for settings that only shape what comes later: image preloads and machines. */
+  /**
+   * Refresh workspace warnings, except for settings that only shape what comes later: image preloads and the machine
+   * limit. Machine profiles decide whether workspaces offer their Machines view.
+   */
   async function workspaceTemplateSettingsResponse(request: Request, result: WorkspaceTemplateSettingsResult): Promise<Response> {
     const url = new URL(request.url);
     const concern = url.pathname.split("/")[3];
-    if (!["preload-images", "machine-profiles", "max-machines"].includes(concern!)) deps.invalidatePresentation();
+    if (concern !== "preload-images" && concern !== "max-machines") deps.invalidatePresentation();
     if (requestAcceptsJson(request)) return jsonResponse(result);
     const workspaceTemplateId = decodeURIComponent(url.pathname.split("/")[2]!);
     const section: TemplateSettingsSection = concern === "seed-config" ? "developer" : concern === "privileged" || concern === "dockerfile" || concern === "preload-images" ? "container" : concern === "machine-profiles" || concern === "max-machines" ? "machines" : "general";

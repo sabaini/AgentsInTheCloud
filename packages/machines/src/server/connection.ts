@@ -11,6 +11,20 @@ const storedConnectionSchema = Type.Object({
   credentials: Type.Object({ certificate: Type.String(), privateKey: Type.String() }),
 });
 
+/** How long Settings and the Machines view wait for the LXD server, which may be off or out of reach. */
+const answerTimeoutMs = 5_000;
+
+/** A server behind a dropped route would otherwise keep a page loading for minutes. */
+export async function answeredInTime<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${answerTimeoutMs / 1000} seconds`)), answerTimeoutMs); });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Like the GitHub token, AITC's LXD client key lives in the data directory, outside Agent sandboxes. */
 function connectionPath(): string {
   return agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "machines", "lxd.json");
@@ -35,7 +49,7 @@ export async function disconnectLxd(): Promise<string | undefined> {
   if (!connection) return undefined;
   let leftover: string | undefined;
   try {
-    await new LxdServerClient(connection).removeOwnCertificate();
+    await new LxdServerClient(connection).removeOwnCertificate(AbortSignal.timeout(answerTimeoutMs));
   } catch (error) {
     leftover = `AgentsInTheCloud forgot the LXD server at ${connection.server.address} but couldn't remove its certificate there (${errorMessage(error)}). To remove it yourself, run lxc config trust remove ${certificateFingerprint(connection.credentials.certificate)} on the server.`;
   }

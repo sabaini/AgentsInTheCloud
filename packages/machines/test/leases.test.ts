@@ -186,15 +186,61 @@ test("releasing a booting machine stops waiting for it and deletes it with its d
   await expect(leases.release("w1", "node-1")).rejects.toThrow("no machine called node-1");
 });
 
-test("after a restart, machines that were booting carry on and ones never created are marked failed", async () => {
+test("after a restart, machines that were booting carry on, ones LXD is still making are waited for, and ones never made are marked failed", async () => {
   const lease = (name: string, status: string) => ({ name, location: lxd.location, instance: machineInstanceName("w1", name), profile: { name: "client", image: "ubuntu:24.04", type: "container", lxdProfiles: ["default"], cpus: 1, memoryGiB: 1, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status, hostKeys: [] });
   await mkdir(join(directory, "w1"), { recursive: true });
-  await writeFile(join(directory, "w1", "leases.json"), JSON.stringify({ leases: [lease("booting", "starting"), lease("lost", "creating")] }));
+  await writeFile(join(directory, "w1", "leases.json"), JSON.stringify({ leases: [lease("booting", "starting"), lease("downloading", "creating"), lease("lost", "creating")] }));
   await lxd.createInstance({ name: machineInstanceName("w1", "booting"), type: "container", source: { type: "image", alias: "24.04" } });
 
-  const leases = createMachineLeases(dependencies());
+  const leases = createMachineLeases(dependencies({ bootTimeoutMs: 300 }));
   expect((await leases.waitFor("w1", "booting", 5_000)).state).toBe("ready");
+  // LXD lists an instance only once it has its image.
+  expect((await leases.waitFor("w1", "downloading", 20)).state).toBe("creating");
+  await lxd.createInstance({ name: machineInstanceName("w1", "downloading"), type: "container", source: { type: "image", alias: "24.04" } });
+  expect((await leases.waitFor("w1", "downloading", 5_000)).state).toBe("ready");
   expect(await leases.waitFor("w1", "lost", 5_000)).toMatchObject({ state: "failed", error: expect.stringContaining("restarted before this machine was created") });
+});
+
+test("listing machines while one is made or released doesn't take it for one a restart interrupted", async () => {
+  lxd.probesUntilBooted = Number.POSITIVE_INFINITY;
+  const statuses = new Set<string>();
+  // Like the Machines view, which lists them whenever they change.
+  const leases = createMachineLeases(dependencies({
+    changed: async (workspaceId, stored) => {
+      for (const lease of stored) statuses.add(lease.status);
+      await leases.list(workspaceId);
+    },
+  }));
+  expect(await leases.acquire("w1", { profile: "client" }, 20)).toMatchObject({ state: "starting" });
+  expect(statuses).toEqual(new Set(["creating", "starting"]));
+
+  let probes = 0;
+  const readInstanceFile = lxd.readInstanceFile.bind(lxd);
+  lxd.readInstanceFile = async (name, path) => {
+    probes++;
+    return await readInstanceFile(name, path);
+  };
+  const deleteInstance = lxd.deleteInstance.bind(lxd);
+  lxd.deleteInstance = async (name) => {
+    await leases.list("w1");
+    await deleteInstance(name);
+  };
+  await leases.release("w1", "client-1");
+  const after = probes;
+  await Bun.sleep(30);
+  expect(probes).toBe(after);
+});
+
+test("with no LXD server connected, machines show as out of reach, and listing or parking them leaves them be", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  connected = false;
+  await leases.wake("w1");
+  await leases.stopAll("w1");
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["disconnected"]);
+  await expect(leases.release("w1", "client-1")).rejects.toThrow("No LXD server is connected");
+  connected = true;
+  expect(lxd.instancesByName.get(machineInstanceName("w1", "client-1"))!.status).toBe("Running");
 });
 
 test("snapshots restore a machine and wait for it to come back", async () => {
@@ -323,6 +369,86 @@ test("when one machine doesn't shut down for a snapshot, the others start again 
   expect((await leases.list("w1")).map((machine) => [machine.state, machine.snapshots])).toEqual([["ready", []], ["ready", []]]);
 });
 
+test("when one machine doesn't start after a restore, the others are watched while they boot, and it stays stopped until its next use", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
+  await leases.acquire("w1", { profile: "client", name: "b" }, 5_000);
+  await leases.snapshot("w1", ["a", "b"], "formed", 5_000);
+  const [a, b] = ["a", "b"].map((name) => machineInstanceName("w1", name));
+  const restoreSnapshot = lxd.restoreSnapshot.bind(lxd);
+  lxd.restoreSnapshot = async (name, snapshot) => {
+    await restoreSnapshot(name, snapshot);
+    lxd.instancesByName.get(name)!.probesUntilBooted = Number.POSITIVE_INFINITY;
+  };
+  const setState = lxd.setInstanceState.bind(lxd);
+  let startA: (() => void) | undefined;
+  lxd.setInstanceState = async (name, action) => {
+    if (action === "start" && name === b) throw new LxdRequestError(500, "Failed to start");
+    if (action === "start" && name === a) await new Promise<void>((resolve) => { startA = resolve; });
+    await setState(name, action);
+  };
+  let settled = false;
+  const restoring = leases.restore("w1", ["a", "b"], "formed", 5_000);
+  void restoring.catch(() => undefined).finally(() => { settled = true; });
+  while (!startA) await Bun.sleep(1);
+  await Bun.sleep(20);
+  // Nothing else gets to the machines while one of them is still starting.
+  expect(settled).toBe(false);
+  startA();
+  await expect(restoring).rejects.toThrow("Failed to start");
+  expect((await leases.list("w1")).map((machine) => [machine.state, machine.error])).toEqual([["starting", undefined], ["stopped", undefined]]);
+
+  lxd.setInstanceState = setState;
+  for (const name of [a, b]) lxd.instancesByName.get(name)!.probesUntilBooted = 0;
+  await leases.usable("w1", "a", 5_000);
+  await leases.usable("w1", "b", 5_000);
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["ready", "ready"]);
+});
+
+test("when one machine doesn't wake, the ones that did are watched while they boot", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
+  await leases.acquire("w1", { profile: "client", name: "b" }, 5_000);
+  await leases.stopAll("w1");
+  const [a, b] = ["a", "b"].map((name) => machineInstanceName("w1", name));
+  const setState = lxd.setInstanceState.bind(lxd);
+  lxd.setInstanceState = async (name, action) => {
+    if (action === "start" && name === b) throw new LxdRequestError(500, "Failed to start");
+    await setState(name, action);
+    lxd.instancesByName.get(name)!.probesUntilBooted = Number.POSITIVE_INFINITY;
+  };
+  await expect(leases.wake("w1")).rejects.toThrow("Failed to start");
+  // Not ready before it has booted.
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["starting", "stopped"]);
+  lxd.setInstanceState = setState;
+  lxd.instancesByName.get(a)!.probesUntilBooted = 0;
+  await leases.usable("w1", "a", 5_000);
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["ready", "stopped"]);
+});
+
+test("a machine used right after its workspace is parked waits for it to shut down, then starts again", async () => {
+  const leases = createMachineLeases(dependencies());
+  await leases.acquire("w1", { profile: "client" }, 5_000);
+  const instance = lxd.instancesByName.get(machineInstanceName("w1", "client-1"))!;
+  const setState = lxd.setInstanceState.bind(lxd);
+  let stop: (() => void) | undefined;
+  lxd.setInstanceState = async (name, action) => {
+    if (action === "stop") await new Promise<void>((resolve) => { stop = resolve; });
+    await setState(name, action);
+  };
+  const parking = leases.stopAll("w1");
+  while (!stop) await Bun.sleep(1);
+  // It's still running while it shuts down.
+  const using = leases.usable("w1", "client-1", 5_000);
+  await Bun.sleep(20);
+  lxd.log = [];
+  stop();
+  await parking;
+  await using;
+  expect(lxd.log).toEqual([`stop ${instance.name}`, `start ${instance.name}`]);
+  expect(instance.status).toBe("Running");
+});
+
 test("parking stops ready machines, and their next use starts them again", async () => {
   const leases = createMachineLeases(dependencies());
   await leases.acquire("w1", { profile: "node" }, 5_000);
@@ -413,12 +539,14 @@ test("a workspace being deleted gets no new machines, and ones already being acq
   expect(lxd.instancesByName.size).toBe(0);
   expect(await leases.stored("w1")).toEqual([]);
 
-  // A deletion that fails leaves the workspace as it was.
+  // A deletion that fails, at this step or a later one, leaves the workspace as it was once it's reopened.
   lxd.deleteInstance = deleteInstance;
   await leases.acquire("w2", { profile: "client" }, 5_000);
   lxd.deleteInstance = async () => { throw new Error("LXD is busy"); };
   await expect(leases.releaseAll("w2")).rejects.toThrow("LXD is busy");
   lxd.deleteInstance = deleteInstance;
+  await expect(leases.acquire("w2", { profile: "client" }, 5_000)).rejects.toThrow("being deleted");
+  leases.reopen("w2");
   expect((await leases.acquire("w2", { profile: "client" }, 5_000)).name).toBe("client-2");
 });
 

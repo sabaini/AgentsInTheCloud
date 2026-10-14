@@ -10,7 +10,7 @@ export class FakeLxd implements MachineLxd {
   instancesByName = new Map<string, FakeInstance>();
   volumes = new Map<string, string>();
   volumeSnapshots = new Map<string, string[]>();
-  /** State changes, commands run, snapshots and restores, with the state of the instance they're for at the time. */
+  /** State changes, snapshots and restores, with the state of the instance they're for at the time. */
   log: string[] = [];
   profiles = new Map<string, LxdDevices>([
     ["default", { root: { type: "disk", path: "/", pool: "default" }, eth0: { type: "nic", network: "lxdbr0" } }],
@@ -124,11 +124,6 @@ export class FakeLxd implements MachineLxd {
     if (path === "/var/lib/cloud/instance/boot-finished") return Buffer.from("done");
     const file = instance.files.get(path);
     return file === undefined ? undefined : Buffer.from(file);
-  }
-  async run(name: string, command: string[]) {
-    const instance = this.existing(name);
-    this.log.push(`run ${command.join(" ")} in ${name} while ${instance.status}`);
-    return { exitCode: 0, stdout: Buffer.alloc(0), stderr: "" };
   }
   async details(name: string) {
     const instance = this.existing(name);

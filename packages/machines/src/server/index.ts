@@ -20,9 +20,9 @@ export const agentsInTheCloudServerModule: WorkspaceModule = {
     onMachinesChanged(context.invalidateWorkspace);
     registerWorkspaceSshKeySource(readWorkspaceMachineKey);
     registerMachineTools(machineLeases);
-    registerMachineLifecycle(context);
-    // Sockets end with the AgentsInTheCloud process; machines outlive it.
+    // Sockets end with the AgentsInTheCloud process; machines outlive it. Before the first expiry sweep, which syncs too.
     for (const workspaceId of await workspacesWithMachines()) await machineTunnels.sync(workspaceId, await machineLeases.stored(workspaceId));
+    registerMachineLifecycle(context);
   },
   attachToWorkspace: ({ workspaceId, init }) => attachMachines(workspaceId, isGitWorkspaceTemplateInit(init) ? workspaceTemplateIdFromInit(init) : undefined),
 };

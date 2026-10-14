@@ -576,12 +576,17 @@ export async function deleteWorkspace(id: string, options: DeleteWorkspaceOption
     await options.events?.emit("workspace_delete_inspect", { workspaceId: id, issues });
     if (issues.length > 0) throw new AgentsInTheCloudCoreError("workspace_delete_blocked", formatDeleteBlockedMessage(id, issues), { workspaceId: id, issues });
   }
-  // Join workspace consumers while their container and persisted files still exist.
-  await options.events?.emit("workspace_deleting", { workspaceId: id });
-  if (containerExists) await requireDocker(["rm", "-f", "--volumes", workspaceContainerName(id)]);
-  const networks = await requireDocker(["network", "ls", "--quiet", "--filter", `name=^${workspaceNetworkName(id).replaceAll(".", "\\.")}$`]);
-  if (networks.stdout.trim()) await requireDocker(["network", "rm", workspaceNetworkName(id)]);
-  await retireWorkspaceId(id);
+  try {
+    // Join workspace consumers while their container and persisted files still exist.
+    await options.events?.emit("workspace_deleting", { workspaceId: id });
+    if (containerExists) await requireDocker(["rm", "-f", "--volumes", workspaceContainerName(id)]);
+    const networks = await requireDocker(["network", "ls", "--quiet", "--filter", `name=^${workspaceNetworkName(id).replaceAll(".", "\\.")}$`]);
+    if (networks.stdout.trim()) await requireDocker(["network", "rm", workspaceNetworkName(id)]);
+    await retireWorkspaceId(id);
+  } catch (error) {
+    await options.events?.emit("workspace_delete_failed", { workspaceId: id });
+    throw error;
+  }
   workspaceGatewayCache.delete(workspaceGatewayCacheKey(id));
   await options.events?.emit("workspace_deleted", { workspaceId: id });
   await rm(agentsInTheCloudDataPath(getAgentsInTheCloudRuntimeContext(), "workspace-sockets", id), { recursive: true, force: true });

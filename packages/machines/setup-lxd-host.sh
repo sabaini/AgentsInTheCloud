@@ -12,6 +12,7 @@ pool=local
 uplink=aitc-uplink
 listen="[::]:8443"
 pki=/var/snap/microovn/common/data/pki
+ovn_env=/var/snap/microovn/common/data/env/ovn.env
 
 usage() {
   cat <<'EOF'
@@ -67,10 +68,11 @@ install_microovn() {
     lxd waitready --timeout=300
   fi
   if [ -z "$(lxc config get network.ovn.northbound_connection)" ]; then
-    # OVN listens on the address MicroOVN took when it started: the one the default route goes out from.
-    local address
-    address=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
-    lxc config set network.ovn.northbound_connection="ssl:$address:6641" \
+    # MicroOVN writes down where OVN's northbound database is, like ssl:10.0.0.5:6641.
+    local northbound
+    northbound=$(sed -n 's/^OVN_NB_CONNECT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ovn_env")
+    [ -n "$northbound" ] || fail "MicroOVN didn't say where OVN listens. Look for OVN_NB_CONNECT in $ovn_env."
+    lxc config set network.ovn.northbound_connection="$northbound" \
       network.ovn.ca_cert="$(cat "$pki/cacert.pem")" \
       network.ovn.client_cert="$(cat "$pki/client-cert.pem")" \
       network.ovn.client_key="$(cat "$pki/client-privkey.pem")"
@@ -87,7 +89,7 @@ configure_lxd() {
       if [ -z "$size" ]; then
         local free
         free=$(df --output=avail -BG /var/snap/lxd/common | awk 'NR == 2 { print int($1) }')
-        [ "$free" -ge 40 ] || fail "There's only ${free} GiB free on the root disk. Give machines a disk of their own with --disk."
+        [ "$free" -ge 40 ] || fail "There's only ${free} GiB free on the root disk. Give machines a disk of their own with --disk, or a smaller file with --size."
         size="$((free / 2))GiB"
       fi
       say "Making storage pool $pool, $size"
@@ -99,6 +101,9 @@ configure_lxd() {
     # It keeps IPv6, though machine networks have none: without it, LXD 6.9 fails to parse the uplink when it checks a
     # network forward, before it gets to refusing one.
     lxc network create "$uplink" ipv4.address=auto ipv4.nat=true
+  fi
+  # Each step is checked on its own, so a run that stopped halfway is finished by the next.
+  if [ -z "$(lxc network get "$uplink" ipv4.ovn.ranges)" ]; then
     local prefix
     prefix=$(lxc network get "$uplink" ipv4.address | cut -d. -f1-3)
     # Each workspace's network takes one address from the OVN range.
@@ -113,8 +118,8 @@ configure_lxd() {
       -c features.profiles=true -c features.networks=true \
       -c restricted=true -c restricted.snapshots=allow \
       -c restricted.networks.uplinks="$uplink"
-    lxc profile device add default root disk path=/ pool="$pool" --project "$project"
   fi
+  lxc profile device get default root pool --project "$project" >/dev/null 2>&1 || lxc profile device add default root disk path=/ pool="$pool" --project "$project"
 }
 
 new_token() {
@@ -148,7 +153,7 @@ main() {
   token=$(new_token)
   cat <<EOF
 
-LXD $(lxd_version) with OVN is ready for AgentsInTheCloud. In AgentsInTheCloud, open Settings, go to Machines, and paste this token:
+LXD $(lxd_version) with OVN is ready. In AgentsInTheCloud, open Settings, go to Machines, and paste this token:
 
 $token
 

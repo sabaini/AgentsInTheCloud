@@ -170,7 +170,7 @@ curl -sS -X POST "http://localhost:3000/workspaces/$id/commands/agent.create.cla
 
 Navigate an existing Browser view with `POST /workspaces/:id/browser/:browserId/navigate` and `{ "url": "..." }`.
 
-Stage test machines for a Workspace whose template has machine profiles, and an LXD server connected in Settings. Creating one waits until it has booted, up to 10 minutes; inside the Workspace, `ssh <name>` then reaches it. `machines.open` opens the Machines Work view.
+Stage test machines for a Workspace whose template has machine profiles, and an LXD server connected in Settings. Creating one waits up to 4 minutes for it to boot and answers with its `state`. One that's still `creating` or `starting` keeps going; list the machines until it's `ready`. Inside the Workspace, `ssh <name>` reaches it, waiting while it boots. `machines.open` opens the Machines Work view.
 
 ```sh
 curl -sS -X POST "http://localhost:3000/workspaces/$id/machines" \

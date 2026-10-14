@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createAgentsInTheCloudEventBus } from "@agents-in-the-cloud/core";
 import { certificateFingerprint, createLxdClientCredentials } from "../src/lxd/index.ts";
 import { saveLxdConnection } from "../src/server/connection.ts";
-import { deleteUntrackedMachine, machinesDeletionReview, untrackedMachines } from "../src/server/lifecycle.ts";
+import { deleteUntrackedMachine, machinesDeletionReview, registerMachineLifecycle, untrackedMachines } from "../src/server/lifecycle.ts";
+import { machineLeases } from "../src/server/runtime.ts";
 import { workspaceNetworkName } from "../src/server/sandbox.ts";
 import { FakeLxd } from "./fake-lxd.ts";
 
@@ -73,4 +75,18 @@ test("a disk that can't be deleted with its untracked machine is named, with how
   lxd.deleteVolume = async () => { throw new Error("storage pool is busy"); };
   await expect(deleteUntrackedMachine(lxd, "lost-bbbb")).rejects.toThrow("lost-bbbb is deleted, but one of its disks isn’t (storage pool is busy). To delete it, run lxc storage volume delete default lost-bbbb-disk1 --project agents-in-the-cloud on the LXD server.");
   expect(lxd.instancesByName.has("lost-bbbb")).toBe(false);
+});
+
+test("a workspace whose deletion doesn't go through can have machines again, also when its machines had gone already", async () => {
+  const events = createAgentsInTheCloudEventBus();
+  // SAFETY: Machine lifecycle registration uses only the context's events and onWorkspaceRemoved.
+  registerMachineLifecycle({ events, onWorkspaceRemoved: () => {} } as never);
+  const warned = spyOn(console, "warn").mockImplementation(() => undefined);
+  await events.emit("workspace_deleting", { workspaceId: "w1" });
+  await expect(machineLeases.acquire("w1", { profile: "node" }, 0)).rejects.toThrow("being deleted");
+  // As when its container can't be removed.
+  await events.emit("workspace_delete_failed", { workspaceId: "w1" });
+  await expect(machineLeases.acquire("w1", { profile: "node" }, 0)).rejects.not.toThrow("being deleted");
+  warned.mockRestore();
+  await events.emit("agents_in_the_cloud_host_stopping", {});
 });

@@ -279,12 +279,7 @@ export interface GlobalSidebarContributionRegistry {
   set(contributionId: string, html?: string, regions?: readonly import("./live-presentation.ts").LiveRegion[]): void;
 }
 
-interface SettingsRenderContext {
-  /** Where this browser reaches AgentsInTheCloud, like `https://host.tailnet.ts.net`. */
-  origin: string;
-}
-
-interface SettingsActionContext extends SettingsRenderContext {
+interface SettingsActionContext {
   request: Request;
   url: URL;
 }
@@ -295,7 +290,7 @@ export interface SettingsContribution {
   label: string;
   icon?: string;
   order?: number;
-  render(context: SettingsRenderContext): Promise<string>;
+  render(): Promise<string>;
   handleAction?(context: SettingsActionContext): Promise<Response | undefined>;
 }
 

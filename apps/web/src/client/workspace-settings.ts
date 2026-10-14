@@ -1,6 +1,7 @@
 import { AppSettingsController } from "./app-settings-controller.ts";
 import { SettingsEditorController } from "./settings-editor-controller.ts";
 import { TemplateSettingsController } from "./template-settings-controller.ts";
+import { WorkspaceTemplateMachineProfileController } from "./workspace-template-machine-profile-controller.ts";
 import { WorkspaceTemplateNewSecretController } from "./workspace-template-new-secret-controller.ts";
 import type { ToggleChangeEvent } from "@agents-in-the-cloud/design-system/toggle/client";
 import { showButtonConfirmation } from "@agents-in-the-cloud/design-system/button-confirmation/client";
@@ -201,6 +202,7 @@ export function registerWorkspaceSettingsControllers(): void {
     "template-settings": TemplateSettingsController,
     "app-settings": AppSettingsController,
     "workspace-template-new-secret": WorkspaceTemplateNewSecretController,
+    "workspace-template-machine-profile": WorkspaceTemplateMachineProfileController,
     "settings-prefetch": SettingsPrefetchController,
     "server-filter": ServerFilterController,
   });

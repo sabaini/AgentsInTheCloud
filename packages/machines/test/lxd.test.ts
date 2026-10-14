@@ -231,30 +231,63 @@ test("exec closes the streams it connected when another one is refused", async (
   expect([...halfSession!.closed].sort()).toEqual(["0", "1", "control"]);
 });
 
-test("a stream LXD pings, closes and drops at once ends without waiting for answers", async () => {
-  // Bun's WebSocket server waits for the client's close frame; LXD doesn't, so this one speaks raw TLS.
-  const tls = await selfSignedServerCertificate("dropping-lxd");
-  const dropping = createServer({ cert: tls.certificate, key: tls.key }, (socket: TLSSocket) => {
+/** Bun's WebSocket server waits for the client's close frame; LXD doesn't, so these speak raw TLS. */
+async function rawLxdStream(name: string, upgraded: (socket: TLSSocket) => void | Promise<void>) {
+  const tls = await selfSignedServerCertificate(name);
+  const server = createServer({ cert: tls.certificate, key: tls.key }, (socket: TLSSocket) => {
     let request = "";
     socket.on("data", async (chunk: Buffer) => {
       request += chunk.toString("latin1");
       const key = /^sec-websocket-key: *(.+)$/im.exec(request)?.[1];
       if (!request.includes("\r\n\r\n") || !key) return;
+      request = "";
       const accept = createHash("sha1").update(`${key.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
-      socket.write(Buffer.concat([Buffer.from(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`), Buffer.from([0x89, 0x00, 0x88, 0x02, 0x03, 0xe8])]));
-      await Bun.sleep(50);
-      socket.resetAndDestroy();
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      await upgraded(socket);
     });
   }).listen(0, "127.0.0.1");
-  await once(dropping, "listening");
+  await once(server, "listening");
   // SAFETY: listen completed on an explicit TCP address, so address() is an AddressInfo.
-  const address = `127.0.0.1:${(dropping.address() as AddressInfo).port}`;
+  const address = `127.0.0.1:${(server.address() as AddressInfo).port}`;
   const stream = await LxdWebSocket.connect({ server: { address, certificate: tls.certificate }, credentials }, new URL(`https://${address}/1.0/operations/x/websocket?secret=x`));
+  return { stream, close: () => server.close() };
+}
+
+const ping = Buffer.from([0x89, 0x00]);
+const closeFrame = Buffer.from([0x88, 0x02, 0x03, 0xe8]);
+
+test("a stream LXD pings, closes and drops at once ends without waiting for answers", async () => {
+  const { stream, close } = await rawLxdStream("dropping-lxd", async (socket) => {
+    socket.write(Buffer.concat([ping, closeFrame]));
+    await Bun.sleep(50);
+    socket.resetAndDestroy();
+  });
   // Read only once the connection is gone, as when LXD fails an exec before its streams are read.
   await Bun.sleep(200);
   expect(await Array.fromAsync(stream.messages())).toEqual([]);
   stream.close();
-  dropping.close();
+  close();
+});
+
+test("a stream LXD pings and drops ends there, even when the pong takes the connection down", async () => {
+  const { stream, close } = await rawLxdStream("pinging-lxd", async (socket) => {
+    socket.write(Buffer.concat([Buffer.from([0x82, 0x03]), Buffer.from("out"), ping]));
+    await Bun.sleep(50);
+    socket.resetAndDestroy();
+  });
+  expect((await Array.fromAsync(stream.messages())).map(String)).toEqual(["out"]);
+  close();
+});
+
+test("a reader that stops early releases the stream", async () => {
+  const released = Promise.withResolvers<void>();
+  const { stream, close } = await rawLxdStream("talking-lxd", (socket) => {
+    socket.once("close", () => released.resolve());
+    socket.write(Buffer.concat([Buffer.from([0x82, 0x01]), Buffer.from("a"), Buffer.from([0x82, 0x01]), Buffer.from("b")]));
+  });
+  for await (const _ of stream.messages()) break;
+  await released.promise;
+  close();
 });
 
 test("exec WebSockets refuse a server other than the pinned one", async () => {

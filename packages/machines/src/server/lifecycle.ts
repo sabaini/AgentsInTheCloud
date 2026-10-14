@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { lxdLocation, sameLxdLocation, type LxdInstance } from "../lxd/index.ts";
 import { readLxdConnection } from "./connection.ts";
-import { removeInstance, removeUnusedNetwork, type MachineLxd } from "./leases.ts";
+import { removeInstance, type MachineLxd } from "./leases.ts";
 import { workspaceMachinesDirectory, workspacesWithMachines } from "./machine-key.ts";
 import { machineLeases, machineTunnels } from "./runtime.ts";
 
@@ -33,8 +33,8 @@ export const machinesDeletionReview: WorkspaceDeletionReview = {
   renderEvidence(_workspaceId, details) {
     if (!Value.Check(evidenceSchema, details)) throw new Error("Machine deletion evidence is invalid");
     const sections = [];
-    if (details.deleted.length) sections.push(`<p>Its machines will be deleted too, with their disks and snapshots:</p>${machineList(details.deleted)}`);
-    if (details.kept.length) sections.push(`<p>${details.deleted.length ? "These ones" : "Its machines"} will stay on their LXD server, which isn’t connected right now. Reconnect it in Settings to delete them there:</p>${machineList(details.kept)}`);
+    if (details.deleted.length) sections.push(`<p>Deleting this workspace also deletes its machines, with their disks and snapshots:</p>${machineList(details.deleted)}`);
+    if (details.kept.length) sections.push(`<p>${details.deleted.length ? "These machines" : "Its machines"} stay on their LXD server, which isn’t connected right now. Connect it again in Settings to delete them there:</p>${machineList(details.kept)}`);
     return `<section class="workspace-deletion-machines">${sections.join("")}</section>`;
   },
 };
@@ -63,8 +63,7 @@ export async function deleteUntrackedMachine(lxd: MachineLxd, name: string): Pro
       left.push({ pool: device.pool, volume: device.source, error });
     }
   }
-  const workspaceId = machine.config["user.aitc.workspace"]!;
-  await removeUnusedNetwork(lxd, workspaceId, await machineLeases.stored(workspaceId));
+  await machineLeases.removeNetworkIfUnused(lxd, machine.config["user.aitc.workspace"]!);
   if (!left.length) return;
   const commands = left.map(({ pool, volume }) => `lxc storage volume delete ${pool} ${volume} --project ${lxd.location.project}`);
   throw new AgentsInTheCloudCoreError("machine_unavailable", `${name} is deleted, but ${left.length === 1 ? "one of its disks isn’t" : "some of its disks aren’t"} (${errorMessage(left[0]!.error)}). To delete ${left.length === 1 ? "it" : "them"}, run ${commands.join(" and ")} on the LXD server.`);
@@ -89,16 +88,20 @@ export function registerMachineLifecycle(context: WorkspaceServerModuleContext):
     const kept = await machineLeases.releaseAll(workspaceId);
     if (kept.length) console.warn(`[machines] Workspace ${workspaceId}'s machines ${kept.join(", ")} stay on an LXD server that isn't connected, untracked`);
   });
+  // A deletion that stops leaves the workspace as it was; trying again releases whatever it gets meanwhile.
+  context.events.on("workspace_delete_failed", ({ workspaceId }) => machineLeases.reopen(workspaceId));
   context.onWorkspaceRemoved(async (workspaceId) => {
     await machineTunnels.close(workspaceId);
     await rm(workspaceMachinesDirectory(workspaceId), { recursive: true, force: true });
   });
   context.events.on("workspace_suspending", ({ workspaceId }) => {
-    // Parking doesn't wait for VMs to shut down; their next use starts them again.
+    // Parking doesn't wait for VMs to shut down; their next use waits for that, then starts them again.
     void machineLeases.stopAll(workspaceId).catch((error: Error) => console.error(`[machines] Couldn't stop workspace ${workspaceId}'s machines:`, error));
   });
-  const sweep = setInterval(() => void sweepExpired(), sweepIntervalMs);
+  // Nothing waits for a sweep, so a failure that isn't one workspace's, like an unreadable connection, is reported here.
+  const sweepNow = () => void sweepExpired().catch((error: Error) => console.error("[machines] Couldn't release expired machines:", error));
+  const sweep = setInterval(sweepNow, sweepIntervalMs);
   sweep.unref();
   context.events.on("agents_in_the_cloud_host_stopping", () => clearInterval(sweep));
-  void sweepExpired();
+  sweepNow();
 }

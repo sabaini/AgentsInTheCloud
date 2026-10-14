@@ -426,7 +426,7 @@ export function renderWorkspaceDeletionPresentation(workspaceId: string, deletio
   });
   let content: string;
   if (deletion.status === "checking") {
-    content = '<div class="workspace-deletion-heading"><span class="status-spinner" aria-hidden="true"></span><h1>Checking if it’s safe to delete…</h1><p>AgentsInTheCloud is checking for local Git work and saved review comments.</p></div>';
+    content = '<div class="workspace-deletion-heading"><span class="status-spinner" aria-hidden="true"></span><h1>Checking if it’s safe to delete…</h1><p>AgentsInTheCloud is checking for local Git work, saved review comments and machines.</p></div>';
   } else if (deletion.status === "deleting") {
     const title = deletion.forced ? "Force deleting workspace…" : "Deleting workspace…";
     const detail = deletion.forced ? "Local changes may be discarded." : "The safety check passed. AgentsInTheCloud is removing the workspace.";

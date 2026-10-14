@@ -69,6 +69,8 @@ declare module "@agents-in-the-cloud/core" {
     workspace_runtime_ready: { workspaceId: string };
     workspace_deleting: WorkspaceDeletedEvent;
     workspace_deleted: WorkspaceDeletedEvent;
+    /** A deletion that emitted workspace_deleting stopped before the workspace was gone; it carries on. */
+    workspace_delete_failed: WorkspaceDeletedEvent;
     workspace_delete_inspect: WorkspaceDeleteInspectEvent;
     workspace_user_activity: WorkspaceUserActivityEvent;
     workspace_title_changed: WorkspaceTitleChangedEvent;
