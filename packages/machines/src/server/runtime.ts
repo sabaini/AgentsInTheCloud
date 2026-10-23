@@ -34,6 +34,7 @@ export function onMachinesChanged(invalidateWorkspace: (workspaceId: string) => 
 
 export const machineTunnels = createMachineTunnels({
   usable: (workspaceId, name) => machineLeases.usable(workspaceId, name, machineBootWaitMs),
+  publicKey: workspaceMachinePublicKey,
   hostDirectory: workspaceSshDirectory,
   containerDirectory: workspaceSshContainerDirectory,
 });

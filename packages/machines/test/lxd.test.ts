@@ -12,7 +12,7 @@ import { certificateFingerprint, createLxdClientCredentials, joinLxdServer, LxdC
 import { LxdWebSocket } from "../src/lxd/websocket.ts";
 
 type Fd = "0" | "1" | "2" | "control";
-interface ExecSession { running: boolean; sockets: Map<Fd, ServerWebSocket<Upgrade>>; closed: Set<Fd>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<void>> }
+interface ExecSession { running: boolean; sockets: Map<Fd, ServerWebSocket<Upgrade>>; closed: Set<Fd>; opened: ReturnType<typeof Promise.withResolvers<void>>; finished: ReturnType<typeof Promise.withResolvers<number>> }
 type OperationResult = { status_code: number; err: string; metadata: { return: number } | null };
 interface Upgrade { session: ExecSession; fd: Fd }
 
@@ -100,7 +100,7 @@ beforeAll(async () => {
           return [fd, secret];
         }));
         return operation(running
-          ? session.finished.promise.then(() => ({ status_code: 200, err: "", metadata: { return: 3 } }))
+          ? session.finished.promise.then((status) => ({ status_code: 200, err: "", metadata: { return: status } }))
           : session.opened.promise.then(() => ({ error: "LXD VM agent is not currently running" })), { fds });
       }
       const wait = path.match(/^\/1\.0\/operations\/([^/]+)\/wait$/);
@@ -127,17 +127,18 @@ beforeAll(async () => {
           stream.terminate();
         }
       },
-      // Behaves like `cat`: stdin is echoed to stdout until stdin closes.
+      // Behaves like `cat`: stdin is echoed to stdout until stdin closes. Closing control kills it, as LXD does.
       async message(socket, message) {
         await socket.data.session.opened.promise;
         if (socket.data.fd === "0") socket.data.session.sockets.get("1")!.send(message);
       },
       async close(socket) {
-        socket.data.session.closed.add(socket.data.fd);
-        if (socket.data.fd !== "0" || !socket.data.session.running) return;
-        await socket.data.session.opened.promise;
-        for (const fd of ["1", "2", "control"] as const) socket.data.session.sockets.get(fd)!.close(1000);
-        socket.data.session.finished.resolve();
+        const { session, fd } = socket.data;
+        session.closed.add(fd);
+        if ((fd !== "0" && fd !== "control") || !session.running) return;
+        await session.opened.promise;
+        for (const other of ["1", "2", "control"] as const) session.sockets.get(other)!.close(1000);
+        session.finished.resolve(fd === "0" ? 3 : 137);
       },
     },
   });
@@ -219,6 +220,12 @@ test("exec keeps only as much output as asked for, and still runs the command to
   const result = await client().run("box", ["cat"], input, 1000);
   expect(result.exitCode).toBe(3);
   expect(result.stdout.equals(input.subarray(0, 1000))).toBe(true);
+});
+
+test("killing an exec closes its control stream, and LXD ends the command, which never reads its input", async () => {
+  const process = await client().exec("box", ["sleep", "infinity"]);
+  process.kill();
+  expect(await Promise.all([Array.fromAsync(process.stdout), Array.fromAsync(process.stderr), process.exited])).toEqual([[], [], 137]);
 });
 
 test("exec fails with LXD's error when the command can't start", async () => {

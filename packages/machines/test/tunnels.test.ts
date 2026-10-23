@@ -24,11 +24,13 @@ const lxd: MachineTunnelLxd = {
       stderr: (async function* () {})(),
       write: (data) => new Promise((resolve, reject) => socket.write(data, (error) => error ? reject(error) : resolve())),
       closeStdin: () => { socket.end(); },
+      kill: () => { socket.destroy(); },
       exited: once(socket, "close").then(() => 0),
     };
   },
 };
 
+const publicKey = async (workspaceId: string) => `ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace ${workspaceId}`;
 const lease = (name: string, status: MachineLease["status"]): MachineLease => ({ name, location: { address: "lxd.test:8443", fingerprint: "a1", project: "agents-in-the-cloud" }, instance: `${name}-abcd1234`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: 0, status, hostKeys: [`ssh-ed25519 AAAA${name}`] });
 
 beforeAll(async () => {
@@ -42,12 +44,15 @@ beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), "machines-tunn
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
 
 test("ready machines get a socket relayed into the machine, an SSH host entry and their host keys", async () => {
-  const tunnels = createMachineTunnels({ usable: async () => lxd, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  const tunnels = createMachineTunnels({ usable: async () => lxd, publicKey, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
   await tunnels.sync("w1", [lease("node-1", "ready"), { ...lease("node-2", "starting"), hostKeys: [] }]);
 
   const config = await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8");
   const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(config)![1]!;
   expect(config).toContain("Host node-1\n    User ubuntu\n");
+  // Only the workspace's machine key, however many more its agent holds.
+  expect(config).toContain("    IdentityFile /run/ssh/machines/id_ed25519.pub\n    IdentitiesOnly yes\n");
+  expect(await readFile(join(directory, "machines", "id_ed25519.pub"), "utf8")).toBe("ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace w1\n");
   expect(config).toContain("UserKnownHostsFile /run/ssh/machines/known_hosts\n    KnownHostsCommand none\n    StrictHostKeyChecking yes\n");
   expect(config).not.toContain("node-2");
   expect(await readFile(join(directory, "machines", "known_hosts"), "utf8")).toBe("node-1 ssh-ed25519 AAAAnode-1\n");
@@ -76,7 +81,7 @@ test("a connection waiting for its machine to restart doesn't hold up the lease 
     await tunnels.sync(workspaceId, [lease(name, "starting")]);
     return lxd;
   };
-  tunnels = createMachineTunnels({ usable, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  tunnels = createMachineTunnels({ usable, publicKey, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
   await tunnels.sync("w1", [lease("node-1", "ready")]);
   const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
   const client = connect(join(directory, "machines", socket));
@@ -104,12 +109,13 @@ test("the relay keeps only the start of what the machine writes to stderr", asyn
         stderr: (async function* () { for (let i = 0; i < 4096; i++) yield Buffer.alloc(1024, "e"); })(),
         write: async () => undefined,
         closeStdin: () => undefined,
+        kill: () => undefined,
         exited: Promise.resolve(1),
       };
     },
   };
   const logged = spyOn(console, "error").mockImplementation(() => undefined);
-  const tunnels = createMachineTunnels({ usable: async () => noisy, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  const tunnels = createMachineTunnels({ usable: async () => noisy, publicKey, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
   await tunnels.sync("w1", [lease("node-1", "ready")]);
   const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
   const client = connect(join(directory, "machines", socket));
@@ -135,12 +141,13 @@ test("losing the machine's side mid-connection ends it, so ssh doesn't wait for 
         stderr: (async function* () {})(),
         write: async () => sent.resolve(),
         closeStdin: () => undefined,
+        kill: () => undefined,
         exited: Promise.resolve(1),
       };
     },
   };
   const logged = spyOn(console, "error").mockImplementation(() => undefined);
-  const tunnels = createMachineTunnels({ usable: async () => failing, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  const tunnels = createMachineTunnels({ usable: async () => failing, publicKey, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
   await tunnels.sync("w1", [lease("node-1", "ready")]);
   const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
   const client = connect(join(directory, "machines", socket));
@@ -150,4 +157,40 @@ test("losing the machine's side mid-connection ends it, so ssh doesn't wait for 
   expect(logged).toHaveBeenCalledWith("[machines] SSH relay to node-1-abcd1234 failed:", expect.objectContaining({ message: "LXD connection reset" }));
   logged.mockRestore();
   await tunnels.close("w1");
+});
+
+test("closing a machine's tunnel ends the commands of its connections, also ones that would carry on after their input ends", async () => {
+  const started: Promise<void>[] = [];
+  const killed: Promise<void>[] = [];
+  const stubborn: MachineTunnelLxd = {
+    async exec() {
+      const kill = Promise.withResolvers<void>();
+      const running = Promise.withResolvers<void>();
+      started.push(running.promise);
+      killed.push(kill.promise);
+      running.resolve();
+      return {
+        stdout: (async function* () { await kill.promise; })(),
+        stderr: (async function* () { await kill.promise; })(),
+        write: async () => undefined,
+        closeStdin: () => undefined,
+        kill: () => kill.resolve(),
+        exited: kill.promise.then(() => 137),
+      };
+    },
+  };
+  const logged = spyOn(console, "error").mockImplementation(() => undefined);
+  const tunnels = createMachineTunnels({ usable: async () => stubborn, publicKey, hostDirectory: () => directory, containerDirectory: "/run/ssh" });
+  await tunnels.sync("w1", [lease("node-1", "ready")]);
+  const socket = /UNIX-CONNECT:\/run\/ssh\/machines\/([0-9a-f]{12}\.sock)/.exec(await readFile(join(directory, "ssh_config.d", "machines.conf"), "utf8"))![1]!;
+  for (let i = 0; i < 2; i++) {
+    const client = connect(join(directory, "machines", socket));
+    await once(client, "connect");
+    client.end();
+  }
+  while (started.length < 2) await Bun.sleep(1);
+  await Promise.all(started);
+  await tunnels.close("w1");
+  await Promise.all(killed);
+  logged.mockRestore();
 });

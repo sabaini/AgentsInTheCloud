@@ -11,6 +11,8 @@ export type MachineTunnelLxd = Pick<LxdClient, "exec">;
 export interface MachineTunnelDependencies {
   /** Waits until the machine can take a connection, starting it if it's stopped, and returns the LXD project it's in. */
   usable(workspaceId: string, name: string): Promise<MachineTunnelLxd>;
+  /** The key the workspace's machines trust, whose private half its SSH agent holds. */
+  publicKey(workspaceId: string): Promise<string>;
   /** The workspace's SSH directory on this host. */
   hostDirectory(workspaceId: string): string;
   /** The same directory inside the workspace container. */
@@ -21,6 +23,7 @@ export interface MachineTunnelDependencies {
 const sshCommand = ["nc", "-N", "127.0.0.1", "22"];
 /** How much of what nc in the machine writes to stderr is kept to explain a failed connection. */
 const stderrKeptChars = 4096;
+const publicKeyName = "id_ed25519.pub";
 
 /** Unix socket paths are limited to 107 bytes, and a machine name can be 40 characters on its own. */
 function socketName(name: string): string {
@@ -31,9 +34,12 @@ function write(socket: Socket, chunk: Buffer): Promise<void> {
   return new Promise((resolve, reject) => socket.write(chunk, (error) => error ? reject(error) : resolve()));
 }
 
+/** ssh offers machines only their key: sshd gives up after six it doesn't know, and the agent may hold more than that. */
 function sshConfig(leases: MachineLease[], directory: string): string {
   const hosts = leases.map((lease) => `Host ${lease.name}
     User ubuntu
+    IdentityFile ${directory}/machines/${publicKeyName}
+    IdentitiesOnly yes
     ProxyCommand socat - UNIX-CONNECT:${directory}/machines/${socketName(lease.name)}
     HostKeyAlias ${lease.name}
     UserKnownHostsFile ${directory}/machines/known_hosts
@@ -56,6 +62,9 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
     client.on("error", () => {});
     try {
       const process = await (await deps.usable(workspaceId, lease.name)).exec(instance, sshCommand);
+      // The command goes once ssh does, as it might not end on its own; ssh may have gone already while the machine started.
+      if (client.destroyed) process.kill();
+      else client.once("close", () => process.kill());
       const toMachine = async () => {
         try {
           // Iterating would otherwise destroy the socket once the client stops sending, cutting off the reply.
@@ -131,6 +140,7 @@ export function createMachineTunnels(deps: MachineTunnelDependencies) {
     for (const lease of reachable) {
       if (!current.has(lease.name)) current.set(lease.name, await listen(join(directory, socketName(lease.name)), workspaceId, lease));
     }
+    await writeFileAtomic(join(directory, publicKeyName), `${await deps.publicKey(workspaceId)}\n`, { mode: 0o644 });
     await writeFileAtomic(join(directory, "known_hosts"), reachable.flatMap((lease) => lease.hostKeys.map((key) => `${lease.name} ${key}\n`)).join(""), { mode: 0o644 });
     await writeFileAtomic(join(deps.hostDirectory(workspaceId), "ssh_config.d", "machines.conf"), sshConfig(reachable, deps.containerDirectory), { mode: 0o644 });
   }

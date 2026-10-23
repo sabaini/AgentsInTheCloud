@@ -109,6 +109,8 @@ export interface LxdExecProcess {
   stderr: AsyncIterable<Buffer>;
   write(data: Uint8Array): Promise<void>;
   closeStdin(): void;
+  /** Ends the command however it's doing, also one that carries on after its input ends: LXD kills it once its control stream closes. */
+  kill(): void;
   /** The command's exit status, once LXD reports the operation finished. */
   exited: Promise<number>;
 }
@@ -360,6 +362,7 @@ export class LxdClient extends LxdServerClient {
       stderr: stderr!.messages(),
       write: (data) => stdin!.send(data),
       closeStdin: () => stdin!.close(),
+      kill: () => control!.close(),
       exited,
     };
   }

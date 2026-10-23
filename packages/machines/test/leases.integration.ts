@@ -61,13 +61,15 @@ try {
   const keyPath = join(directory, "id_ed25519");
   await command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "aitc integration", "-f", keyPath);
 
+  const publicKey = async () => (await readFile(`${keyPath}.pub`, "utf8")).trim();
+
   // On this host, the workspace's SSH directory and the one its container would see are the same.
   const sshDirectory = join(directory, "ssh");
-  const tunnels = createMachineTunnels({ usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
+  const tunnels = createMachineTunnels({ usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), publicKey, hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
   const leases = createMachineLeases({
     lxd: async () => lxd,
     machineSettings: async () => ({ profiles: [profile({ name: "node", cpus: 2, memoryGiB: 2, diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
-    publicKey: async () => (await readFile(`${keyPath}.pub`, "utf8")).trim(),
+    publicKey,
     reachesMachines: async () => true,
     directory: () => directory,
     bootTimeoutMs: 10 * 60_000,
