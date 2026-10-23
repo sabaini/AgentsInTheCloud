@@ -4,7 +4,7 @@
  * after unparking, the Agent wakes it with ssh and restores the snapshot. The HTTP API creates a second machine,
  * which the first reaches at the name and address the API reports, refuses a third and releases it, and deleting the
  * workspace asks before deleting the first, with its network. Every check looks at LXD or the API, not at what the
- * Agent says. Images the machines needed are deleted again afterwards.
+ * Agent says. Deleting the project at the end deletes the images it cached for the machines too.
  *
  * Needs `lxc` with admin access to the server, and an AgentsInTheCloud that isn't connected to LXD yet, with a
  * model provider. `--uplink` is the server's OVN uplink network. The Agent makes fewer than ten small model
@@ -89,11 +89,6 @@ async function trustedFor(name: string): Promise<string | undefined> {
   const entries = JSON.parse(await lxc("config", "trust", "list", ...server, "-f", "json")) as { fingerprint: string; restricted: boolean; projects: string[] | null }[];
   return entries.find((entry) => entry.restricted && isDeepStrictEqual(entry.projects, [name]))?.fingerprint;
 }
-
-// Machines' images land in the server's default project, so they outlive the test's project.
-const images = async () => (await lxc("image", "list", ...server, "-c", "f", "-f", "csv")).split("\n").filter(Boolean);
-const imagesBefore = await images();
-const pulledImages = async () => (await images()).filter((image) => !imagesBefore.includes(image));
 
 try {
   const { workspaceTemplates } = await api<{ workspaceTemplates: { gitUrl: string; branch: string | null }[] }>("GET", "/workspace-templates");
@@ -207,11 +202,9 @@ try {
 
   await lxc("network", "acl", "delete", on(machineNetworkAcl), "--project", project);
   await lxc("project", "delete", on(project));
-  for (const image of await pulledImages()) await lxc("image", "delete", on(image));
   console.log("passed");
 } catch (error) {
   console.error(error);
-  kept.push(...(await pulledImages()).map((image) => `lxc image delete ${on(image)}`));
   console.error(`\nFAILED. Kept for diagnosis; to clean up:\n${kept.map((what) => `  ${what}`).join("\n")}`);
   process.exit(1);
 }
