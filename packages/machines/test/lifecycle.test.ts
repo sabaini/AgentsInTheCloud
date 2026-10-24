@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentsInTheCloudEventBus } from "@agents-in-the-cloud/core";
 import { certificateFingerprint, createLxdClientCredentials } from "../src/lxd/index.ts";
-import { saveLxdConnection } from "../src/server/connection.ts";
+import { addLxdConnection } from "../src/server/connection.ts";
 import { deleteUntrackedMachine, machinesDeletionReview, registerMachineLifecycle, untrackedMachines } from "../src/server/lifecycle.ts";
 import { machineLeases } from "../src/server/runtime.ts";
 import { workspaceNetworkName } from "../src/server/sandbox.ts";
@@ -40,13 +40,13 @@ test("deleting a workspace with machines asks first, naming the ones that go wit
   expect(await machinesDeletionReview.inspect("w1")).toMatchObject({ status: "blocked", details: { deleted: [], kept: ["node-1"] } });
   expect(await machinesDeletionReview.inspect("w2")).toEqual({ status: "clear" });
 
-  const server = await createLxdClientCredentials("lxd.test");
-  await saveLxdConnection({ server: { address: "lxd.test:8443", certificate: server.certificate }, project: "agents-in-the-cloud", credentials: await createLxdClientCredentials("aitc") });
+  const servers = [await createLxdClientCredentials("lxd.test"), await createLxdClientCredentials("other.test")];
+  for (const [index, server] of servers.entries()) await addLxdConnection({ server: { address: `lxd${index}.test:8443`, certificate: server.certificate }, project: "agents-in-the-cloud", credentials: await createLxdClientCredentials("aitc") });
   const lease = (name: string, fingerprint: string) => ({ name, location: { address: "lxd.test:8443", fingerprint, project: "agents-in-the-cloud" }, instance: `${name}-cccc`, profile: { name: "node", image: "ubuntu:24.04", type: "virtual-machine", lxdProfiles: ["default"], cpus: 2, memoryGiB: 2, diskSizesGiB: [] }, volumes: [], createdAt: 0, expiresAt: Date.now() + 3_600_000, status: "ready", hostKeys: [] });
   await mkdir(join(dataDir, "machines", "workspaces", "w3"), { recursive: true });
-  await writeFile(join(dataDir, "machines", "workspaces", "w3", "leases.json"), JSON.stringify({ leases: [lease("here", certificateFingerprint(server.certificate)), lease("elsewhere", "b2")] }));
+  await writeFile(join(dataDir, "machines", "workspaces", "w3", "leases.json"), JSON.stringify({ leases: [lease("here", certificateFingerprint(servers[0]!.certificate)), lease("elsewhere", "b2"), lease("there", certificateFingerprint(servers[1]!.certificate))] }));
   const review = await machinesDeletionReview.inspect("w3");
-  expect(review).toMatchObject({ status: "blocked", details: { deleted: ["here"], kept: ["elsewhere"] } });
+  expect(review).toMatchObject({ status: "blocked", details: { deleted: ["here", "there"], kept: ["elsewhere"] } });
 });
 
 test("only tagged machines no workspace tracks count as untracked, and deleting one takes its disks and network", async () => {

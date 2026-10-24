@@ -93,7 +93,7 @@ const configurationProperties = {
 
 const configurationRecordSchema = Type.Object(configurationProperties);
 
-/** What Agents may create on the connected LXD server; settings it doesn't name, like the root disk, come from the LXD profiles. */
+/** What Agents may create on the connected LXD servers; settings it doesn't name, like the root disk, come from the LXD profiles. */
 const storedMachineProfileSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),

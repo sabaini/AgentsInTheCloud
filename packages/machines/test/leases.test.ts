@@ -14,7 +14,7 @@ let settings: MachineSettings;
 
 function dependencies(overrides: Partial<MachineLeaseDependencies> = {}): MachineLeaseDependencies {
   return {
-    lxd: async () => connected ? lxd : undefined,
+    lxds: async () => connected ? [lxd] : [],
     machineSettings: async () => settings,
     publicKey: async (workspaceId) => `ssh-ed25519 AAAAworkspace agents-in-the-cloud workspace ${workspaceId}`,
     reachesMachines: async () => true,
@@ -579,4 +579,77 @@ test("machines stay with the LXD server they're on: with another connected, they
   expect(await leases.releaseAll("w1")).toEqual(["node-1", "client-1"]);
   expect(lxd.instancesByName.size).toBe(0);
   expect(original.instancesByName.size).toBe(2);
+});
+
+test("a workspace's machines all go on one LXD server: the one with the fewest machines when it gets its first", async () => {
+  const other = new FakeLxd({ address: "other.test:8443", fingerprint: "b2", project: "agents-in-the-cloud" });
+  const leases = createMachineLeases(dependencies({ lxds: async () => [lxd, other] }));
+  const server = async (workspaceId: string) => (await leases.acquire(workspaceId, { profile: "client" }, 5_000)).server;
+  // A tie goes to the server connected first.
+  expect(await server("w1")).toBe("lxd.test:8443");
+  expect(await server("w2")).toBe("other.test:8443");
+  // Its other machines need to reach it, so they follow it, though the other server has fewer.
+  expect(await server("w1")).toBe("lxd.test:8443");
+  expect(await server("w3")).toBe("other.test:8443");
+  expect([...lxd.networks.keys()]).toEqual([workspaceNetworkName("w1")]);
+  expect([...other.networks.keys()]).toEqual([workspaceNetworkName("w2"), workspaceNetworkName("w3")]);
+  for (const server of [lxd, other]) expect(server.acls.has(machineNetworkAcl)).toBe(true);
+  expect((await leases.list("w1")).map((machine) => [machine.name, machine.server, machine.state])).toEqual([["client-1", "lxd.test:8443", "ready"], ["client-2", "lxd.test:8443", "ready"]]);
+});
+
+test("servers that can't take a machine are passed over, and when none can, each one's reason is given", async () => {
+  const other = new FakeLxd({ address: "other.test:8443", fingerprint: "b2", project: "agents-in-the-cloud" });
+  const leases = createMachineLeases(dependencies({ lxds: async () => [lxd, other] }));
+  lxd.version = "6.8";
+  other.profiles.delete("ceph-node");
+  await expect(leases.acquire("w1", { profile: "node" }, 5_000)).rejects.toThrow("None of the connected LXD servers can take this machine. At lxd.test:8443: The LXD server runs LXD 6.8, and machines need LXD 6.9 or later. Ask the user to upgrade it, or to connect another one in Settings, under Machines. At other.test:8443: The LXD server has no profile called ceph-node.");
+  expect([lxd.networks.size, other.networks.size]).toEqual([0, 0]);
+  expect((await leases.acquire("w1", { profile: "client" }, 5_000)).server).toBe("other.test:8443");
+
+  lxd.version = "6.9";
+  lxd.instanceTypes = ["container"];
+  await expect(leases.acquire("w3", { profile: "node" }, 5_000)).rejects.toThrow("At lxd.test:8443: The LXD server can't run virtual machines, as it has no hardware virtualization (/dev/kvm).");
+  lxd.instanceTypes = ["container", "virtual-machine"];
+
+  // One that's out of reach doesn't hold up the others.
+  other.server = async () => { throw new Error("Unable to connect"); };
+  expect((await leases.acquire("w2", { profile: "client" }, 5_000)).server).toBe("lxd.test:8443");
+  // A workspace's own server isn't passed over, though, as its machines couldn't reach one elsewhere.
+  await expect(leases.acquire("w1", { profile: "client" }, 5_000)).rejects.toThrow("Unable to connect");
+  expect(lxd.instancesByName.size).toBe(1);
+});
+
+test("machines on several servers are each parked, woken, snapshotted, expired and released where they are", async () => {
+  const other = new FakeLxd({ address: "other.test:8443", fingerprint: "b2", project: "agents-in-the-cloud" });
+  let servers = [lxd];
+  const leases = createMachineLeases(dependencies({ lxds: async () => servers }));
+  await leases.acquire("w1", { profile: "client", name: "a" }, 5_000);
+  // With its server disconnected, the workspace's next machine goes elsewhere.
+  servers = [other];
+  await leases.acquire("w1", { profile: "node", name: "b" }, 5_000);
+  servers = [lxd, other];
+  const [a, b] = [lxd.instancesByName.get(machineInstanceName("w1", "a"))!, other.instancesByName.get(machineInstanceName("w1", "b"))!];
+  expect((await leases.list("w1")).map((machine) => [machine.name, machine.server, machine.state])).toEqual([["a", "lxd.test:8443", "ready"], ["b", "other.test:8443", "ready"]]);
+
+  await leases.stopAll("w1");
+  expect([a.status, b.status]).toEqual(["Stopped", "Stopped"]);
+  await leases.wake("w1", undefined, 5_000);
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["ready", "ready"]);
+
+  expect((await leases.snapshot("w1", ["a", "b"], "both", 5_000)).map((machine) => [machine.state, machine.snapshots])).toEqual([["ready", ["both"]], ["ready", ["both"]]]);
+  expect((await leases.restore("w1", ["a", "b"], "both", 5_000)).map((machine) => machine.state)).toEqual(["ready", "ready"]);
+
+  // Only the servers its machines are on are asked about them.
+  const third = new FakeLxd({ address: "third.test:8443", fingerprint: "c3", project: "agents-in-the-cloud" });
+  third.instances = async () => { throw new Error("Unable to connect"); };
+  servers = [lxd, third, other];
+  expect((await leases.list("w1")).map((machine) => machine.state)).toEqual(["ready", "ready"]);
+
+  servers = [other];
+  expect(await leases.expire("w1", Number.POSITIVE_INFINITY)).toEqual(["b"]);
+  expect([other.instancesByName.size, other.volumes.size, other.networks.size]).toEqual([0, 0, 0]);
+  servers = [lxd, other];
+  await leases.acquire("w1", { profile: "client", name: "c" }, 5_000);
+  expect(await leases.releaseAll("w1")).toEqual([]);
+  expect([lxd.instancesByName.size, lxd.networks.size]).toEqual([0, 0]);
 });

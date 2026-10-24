@@ -1,10 +1,10 @@
 # Machines
 
-Some work doesn't fit in a workspace container: installing snaps, formatting real disks, loading kernel modules, or forming a cluster out of several machines. **Machines** gives your Agents fresh virtual machines and containers on an LXD server of yours for exactly that. They create them when they need them, reach them with `ssh`, and release them when they're done.
+Some work doesn't fit in a workspace container: installing snaps, formatting real disks, loading kernel modules, or forming a cluster out of several machines. **Machines** gives your Agents fresh virtual machines and containers on LXD servers of yours for exactly that. They create them when they need them, reach them with `ssh`, and release them when they're done.
 
 You set this up once:
 
-1. Connect an LXD server in **Settings › Machines**.
+1. Connect one or more LXD servers in **Settings › Machines**.
 2. Add machine profiles to a workspace template, so its workspaces know what machines they may create.
 
 ## Connect an LXD server
@@ -55,13 +55,24 @@ On a MicroCloud, run them as they are. Elsewhere, put your OVN uplink network in
 
 Paste the token into Settings and select **Connect**. Settings then shows the server, its LXD version and any limits you've set on the project.
 
+To add another server, set it up the same way, then paste its token under **Connect another server**.
+
 To cap how much your Agents can use in total, set limits on the project, for example:
 
 ```sh
 lxc project set agents-in-the-cloud limits.instances=10
 ```
 
-**Disconnect** in Settings forgets the server and removes AgentsInTheCloud's certificate there. Machines that already exist stay on the server. Connect the same server and project again to use or release them.
+**Disconnect** in Settings forgets that server and removes AgentsInTheCloud's certificate there. Machines that already exist stay on the server. Connect the same server and project again to use or release them.
+
+### More than one server
+
+A workspace's machines reach each other on a network of their own, and that network is on one server. So they all go on the same server:
+
+- A workspace's first machine goes on the connected server with the fewest machines, out of the ones that can take it. A server is skipped if it's out of reach, runs an older LXD, has a project that doesn't keep machines apart, or is missing one of the profile's LXD profiles.
+- The workspace's later machines go on that same server. If that server can't take one, your Agent hears why, and the machine isn't put somewhere else, where the others couldn't reach it.
+
+Each server's project limits count on their own. The Machines view shows which server each machine is on.
 
 ## Add machine profiles to a template
 
@@ -70,11 +81,11 @@ A machine profile describes one kind of machine your Agents may create. Profiles
 | Setting | What it does |
 | --- | --- |
 | **Name** | What Agents ask for, like `node`. Machines are named after it, `node-1`, `node-2` and so on, unless your Agent picks a name. |
-| **Image** | `ubuntu:24.04` by default. Images from `ubuntu-daily:` and `images:` work too, and so does the alias of an image already on the LXD server. The image needs cloud-init and openssh-server, which Ubuntu's images have. |
+| **Image** | `ubuntu:24.04` by default. Images from `ubuntu-daily:` and `images:` work too, and so does the alias of an image already on the LXD server. With more than one server, put that image on each of them. The image needs cloud-init and openssh-server, which Ubuntu's images have. |
 | **Type** | **Virtual machine** gets its own kernel and can have extra disks. **Container** starts faster and shares the server's kernel. |
 | **CPUs** and **Memory (GiB)** | 2 CPUs and 2 GiB unless you change them. |
 | **Extra disks (GiB)** | Empty block devices, one per size: `20, 20, 20` gives three disks, for example for Ceph OSDs. A virtual machine gets one 4 GiB disk unless you change it. Containers can't have them, so a container gets none. |
-| **LXD profiles** | The profiles on the LXD server that machines are made with, `default` to start with. The root disk comes from them. |
+| **LXD profiles** | The profiles on the LXD server that machines are made with, `default` to start with. The root disk comes from them. With more than one server, machines only go on servers that have all of these profiles. |
 | **Delete after (hours)** | How long a machine lasts: 24 hours unless you change it, and up to 30 days. It's deleted after that, with its disks and snapshots. |
 
 **Machines per workspace** sets how many machines one workspace can have at once: 10 unless you change it, and up to 20.
@@ -134,6 +145,8 @@ Parking a workspace doesn't delete its machines. It shuts them down, and they st
 If you delete a workspace while its LXD server isn't connected, its machines stay on the server. Once you connect it again, Settings lists them under machines that don't belong to a workspace anymore, with a **Delete** button for each.
 
 ## When something's wrong
+
+**"None of the connected LXD servers can take this machine."** The message gives each server's reason, like the ones below. Fix one of them, or connect another server.
 
 **"No new machines until the server runs LXD 6.9 or later."** Upgrade LXD on the server. On a snap install, run `snap refresh lxd --channel=6/stable`.
 

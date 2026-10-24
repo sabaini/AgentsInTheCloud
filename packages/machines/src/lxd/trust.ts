@@ -92,6 +92,8 @@ export async function joinLxdServer(input: string, credentials: LxdClientCredent
   } catch (error) {
     // LXD answers every unusable token the same way; tokens work once.
     if (error instanceof LxdRequestError && error.status === 403) throw new AgentsInTheCloudCoreError("lxd_token_rejected", "LXD didn't accept this token. Each token works only once, so create a new one.");
+    // Certificates are known by name, and the setup script and Settings always suggest the same one.
+    if (error instanceof LxdRequestError && error.status === 409) throw new AgentsInTheCloudCoreError("lxd_name_taken", `This LXD server already trusts a certificate called ${token.clientName}, probably because it's connected here already. If it isn't, run lxc config trust remove on the server for that certificate, then create a new token.`);
     throw error;
   }
   const { restricted, projects } = await lxd.ownCertificate();

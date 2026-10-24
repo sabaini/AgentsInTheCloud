@@ -27,4 +27,4 @@ export const agentsInTheCloudServerModule: WorkspaceModule = {
   attachToWorkspace: ({ workspaceId, init }) => attachMachines(workspaceId, isGitWorkspaceTemplateInit(init) ? workspaceTemplateIdFromInit(init) : undefined),
 };
 
-export { disconnectLxd } from "./connection.ts";
+export { disconnectAllLxd } from "./connection.ts";

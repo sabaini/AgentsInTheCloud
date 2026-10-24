@@ -3,7 +3,9 @@
 .settings-sec-machines .managed-list__description { white-space: normal; }
 .settings-sec-machines .managed-list__item:has(.machines-connect) { align-items: flex-start; padding: 12px; }
 .machines-provider-icon { display: inline-flex; color: var(--text); }
-.machines-connect { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+/* Set apart from the LXD row's label; under Connect another server, the disclosure does that. */
+.managed-list .machines-connect { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-sec-machines > .disclosure { margin-top: 12px; }
 .machines-connect p { margin: 0; }
 /* Copyable shell commands read better scrolled than wrapped mid-argument. */
 .machines-connect .settings-command { overflow-x: auto; white-space: pre; }

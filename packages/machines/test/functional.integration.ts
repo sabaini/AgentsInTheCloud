@@ -6,8 +6,8 @@
  * workspace asks before deleting the first, with its network. Every check looks at LXD or the API, not at what the
  * Agent says. Deleting the project at the end deletes the images it cached for the machines too.
  *
- * Needs `lxc` with admin access to the server, and an AgentsInTheCloud that isn't connected to LXD yet, with a
- * model provider. `--uplink` is the server's OVN uplink network. The Agent makes fewer than ten small model
+ * Needs `lxc` with admin access to the server, and an AgentsInTheCloud that isn't connected to another LXD server, so
+ * the machines go on this one, with a model provider. `--uplink` is the server's OVN uplink network. The Agent makes fewer than ten small model
  * requests; pick a cheap model with --model.
  * Cleans up on success and keeps everything on failure for diagnosis.
  *
@@ -104,9 +104,8 @@ try {
     const token = (await lxc("config", "trust", "add", ...server, "--name", project, "--restricted", "--projects", project)).split("\n").at(-1)!;
     kept.unshift(`lxc config trust revoke-token ${on(project)}`);
     await submit("/settings/machines/connect", { token });
-    // AgentsInTheCloud keeps an existing connection and ignores the token, which then trusts nothing here.
     const fingerprint = await trustedFor(project);
-    assert(fingerprint, "AgentsInTheCloud didn't join with the token. If it's connected to an LXD server already, disconnect it in Settings first.");
+    assert(fingerprint, "AgentsInTheCloud didn't join with the token.");
     kept[0] = `lxc config trust remove ${on(fingerprint)}`;
   });
 
@@ -195,7 +194,9 @@ try {
   await step("delete the template, and disconnect, which removes AgentsInTheCloud's certificate", async () => {
     await api("POST", `/workspace-templates/${templateId}/delete`, {});
     kept.shift();
-    await submit("/settings/machines/disconnect", {});
+    // SAFETY: the server environment `lxc query /1.0` prints.
+    const { environment } = JSON.parse(await lxc("query", on("/1.0"))) as { environment: { certificate_fingerprint: string } };
+    await submit("/settings/machines/disconnect", { fingerprint: environment.certificate_fingerprint, project });
     assert.equal(await trustedFor(project), undefined);
     kept.shift();
   });

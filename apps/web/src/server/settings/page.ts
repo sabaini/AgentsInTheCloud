@@ -10,7 +10,7 @@ import { invalidArguments } from "@agents-in-the-cloud/core";
 import { errorMessage, escapeHtml, providerBadgeHtml } from "@agents-in-the-cloud/shared";
 import { clearGitHostingCredential, gitHostingProviders } from "@agents-in-the-cloud/git-hosting";
 import { agentsInTheCloudUrl } from "@agents-in-the-cloud/proxy-ingress";
-import { disconnectLxd } from "@agents-in-the-cloud/machines/server";
+import { disconnectAllLxd } from "@agents-in-the-cloud/machines/server";
 import { clearCommitIdentity, getStoredCommitIdentity, setCommitIdentity } from "@agents-in-the-cloud/workspace-templates";
 import { agentsInTheCloudUrlHtml } from "../agents-in-the-cloud-url.ts";
 import { resetOnboarding } from "../onboarding/state.ts";
@@ -154,7 +154,7 @@ async function deleteAllStoredSettings(): Promise<string | undefined> {
   await setEnabledModels([]);
   const runtime = await createPiModelRuntime();
   for (const credential of await runtime.listCredentials()) await runtime.logout(credential.providerId);
-  return await disconnectLxd();
+  return await disconnectAllLxd();
 }
 
 export async function handleSettingsPageRequest(request: Request, url: URL, options: { forceDeleteAllWorkspaces?: () => Promise<WorkspaceCleanupResult>; renderModelPickerUpdates: () => Promise<string> }): Promise<Response | undefined> {

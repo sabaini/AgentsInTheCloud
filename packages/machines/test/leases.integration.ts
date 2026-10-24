@@ -67,7 +67,7 @@ try {
   const sshDirectory = join(directory, "ssh");
   const tunnels = createMachineTunnels({ usable: (workspace, name) => leases.usable(workspace, name, 10 * 60_000), publicKey, hostDirectory: () => sshDirectory, containerDirectory: sshDirectory });
   const leases = createMachineLeases({
-    lxd: async () => lxd,
+    lxds: async () => [lxd],
     machineSettings: async () => ({ profiles: [profile({ name: "node", cpus: 2, memoryGiB: 2, diskSizesGiB: [2, 3] }), profile({ name: "probe", type: "container" })], maxMachines: 2 }),
     publicKey,
     reachesMachines: async () => true,

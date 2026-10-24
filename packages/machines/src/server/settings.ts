@@ -2,10 +2,11 @@ import { AgentsInTheCloudCoreError } from "@agents-in-the-cloud/core";
 import { buttonHtml } from "@agents-in-the-cloud/design-system/button";
 import { copyButtonHtml } from "@agents-in-the-cloud/design-system/copy-button";
 import { destructiveConfirmationHtml } from "@agents-in-the-cloud/design-system/destructive-confirmation";
+import { disclosureHtml } from "@agents-in-the-cloud/design-system/disclosure";
 import { Icons } from "@agents-in-the-cloud/design-system/icons";
 import { errorMessage, escapeHtml, turboStream, turboStreamResponse, type SettingsContribution } from "@agents-in-the-cloud/shared";
-import { createLxdClientCredentials, joinLxdServer, LxdClient, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
-import { answeredInTime, disconnectLxd, readLxdConnection, saveLxdConnection } from "./connection.ts";
+import { createLxdClientCredentials, joinLxdServer, LxdClient, lxdLocation, LxdServerClient, type LxdConnection, type LxdInstance } from "../lxd/index.ts";
+import { addLxdConnection, answeredInTime, disconnectLxd, readLxdConnections } from "./connection.ts";
 import { deleteUntrackedMachine, untrackedMachines } from "./lifecycle.ts";
 import { lxdVersionKeepsSnapshots, projectSandbox } from "./sandbox.ts";
 
@@ -33,9 +34,10 @@ function row(label: string, contentHtml: string, actionsHtml = ""): string {
 
 const setupCommand = `curl -fsSL ${setupScriptUrl} | sudo bash`;
 
-function renderConnectForm(message: string): string {
-  return row("LXD", `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
-    <p>Give Agents their own test machines on a server of yours, for work that needs real disks, a kernel of its own, or several machines.</p>
+/** `introHtml` says what connecting a server is for. */
+function connectFormHtml(introHtml: string, message: string): string {
+  return `<form class="machines-connect form-stack" method="post" action="${connectPath}" data-turbo="true">
+    ${introHtml}
     <p>On a fresh Ubuntu server, this command sets up LXD and OVN:</p>
     <div class="machines-setup-command"><pre class="settings-command">${escapeHtml(setupCommand)}</pre>${copyButtonHtml({ label: "Copy command", copyText: setupCommand })}</div>
     <p>If the server already has LXD 6.9 or later and OVN, like a MicroCloud, run this instead:</p>
@@ -53,16 +55,29 @@ lxc config trust add --name ${suggestedProject} \\
       <input class="settings-input text-field" type="password" name="token" aria-label="LXD trust token" placeholder="Paste the trust token" autocomplete="off" data-1p-ignore required>
       ${buttonHtml({ type: "submit", variant: "primary", content: { kind: "caption", caption: "Connect" }, attributesHtml: 'data-turbo-submits-with="Connecting…"' })}
     </div>
-  </form>`);
+  </form>`;
 }
 
-function renderUntracked(machines: LxdInstance[]): string {
+/** Which connected server a form is about: its certificate and project, which stay when its address changes. */
+function serverFieldsHtml(connection: LxdConnection): string {
+  return `<input type="hidden" name="fingerprint" value="${escapeHtml(lxdLocation(connection).fingerprint)}"><input type="hidden" name="project" value="${escapeHtml(connection.project)}">`;
+}
+
+/** The connected server a form names; none when it's been disconnected meanwhile, as from another page. */
+async function namedConnection(form: FormData): Promise<LxdConnection | undefined> {
+  const fingerprint = String(form.get("fingerprint") ?? "");
+  const project = String(form.get("project") ?? "");
+  return (await readLxdConnections()).find((connection) => connection.project === project && lxdLocation(connection).fingerprint === fingerprint);
+}
+
+/** `serverName` is what the server calls itself. */
+function renderUntracked(connection: LxdConnection, serverName: string, index: number, machines: LxdInstance[]): string {
   if (!machines.length) return "";
-  const rows = machines.map((machine, index) => {
+  const rows = machines.map((machine, row) => {
     const workspace = machine.config["user.aitc.workspace"];
     const lease = machine.config["user.aitc.lease"];
-    const remove = `<form method="post" action="${deleteUntrackedPath}" data-turbo="true"><input type="hidden" name="name" value="${escapeHtml(machine.name)}">${destructiveConfirmationHtml({
-      id: `delete_untracked_machine_${index}`,
+    const remove = `<form method="post" action="${deleteUntrackedPath}" data-turbo="true">${serverFieldsHtml(connection)}<input type="hidden" name="name" value="${escapeHtml(machine.name)}">${destructiveConfirmationHtml({
+      id: `delete_untracked_machine_${index}_${row}`,
       trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Delete" } },
       confirmCaption: `Delete ${machine.name}`,
       cancelCaption: "Cancel",
@@ -73,7 +88,7 @@ function renderUntracked(machines: LxdInstance[]): string {
       <div class="managed-list__actions">${remove}</div>
     </div>`;
   }).join("");
-  return `<div class="machines-untracked"><p>These machines don’t belong to a workspace anymore. Delete them, with their disks and snapshots, when you no longer need them.</p><div class="managed-list">${rows}</div></div>`;
+  return `<div class="machines-untracked"><p>${escapeHtml(`These machines on ${serverName} don’t belong to a workspace anymore.`)} Delete them, with their disks and snapshots, when you no longer need them.</p><div class="managed-list">${rows}</div></div>`;
 }
 
 const notOnMicroCloud = "Not on a MicroCloud? Use your OVN uplink network and storage pool in place of UPLINK and local.";
@@ -91,15 +106,15 @@ function sandboxFixes(project: string, config: Record<string, string>) {
   return { commands, microCloudNames: ownProfiles || missing.includes("restricted.networks.uplinks=UPLINK") };
 }
 
-async function renderConnection(connection: LxdConnection, message: string): Promise<string> {
-  const disconnect = `<form method="post" action="${disconnectPath}" data-turbo="true">${destructiveConfirmationHtml({
-    id: "disconnect_lxd",
+/** `index` numbers the server's confirmations apart from other servers'. */
+async function renderConnection(connection: LxdConnection, index: number): Promise<string> {
+  const disconnect = `<form method="post" action="${disconnectPath}" data-turbo="true">${serverFieldsHtml(connection)}${destructiveConfirmationHtml({
+    id: `disconnect_lxd_${index}`,
     trigger: { type: "button", variant: "danger", content: { kind: "caption", caption: "Disconnect" } },
     confirmCaption: "Disconnect LXD",
     cancelCaption: "Cancel",
   })}</form>`;
   const where = `${connection.project} project at ${connection.server.address}`;
-  const notice = message ? `<p class="settings-error">${escapeHtml(message)}</p>` : "";
   const lxd = new LxdServerClient(connection);
   try {
     const [server, config, untracked] = await answeredInTime(Promise.all([lxd.server(), lxd.projectConfig(connection.project), untrackedMachines(new LxdClient(connection))]));
@@ -108,41 +123,66 @@ async function renderConnection(connection: LxdConnection, message: string): Pro
     const fixes = sandboxFixes(connection.project, config);
     const sandbox = fixes.commands.length ? `<div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> No new machines until this project keeps them apart from the rest of the network. On the LXD server, run:</div>
       <pre class="settings-command">${escapeHtml(fixes.commands.join("\n"))}</pre>${fixes.microCloudNames ? `<div class="managed-list__description">${notOnMicroCloud}</div>` : ""}` : "";
-    return row(`LXD on ${server.name}`, `<div class="managed-list__description">${escapeHtml(`${where} · LXD ${server.version}`)}</div>
-      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>${upgrade}${sandbox}`, disconnect) + notice + renderUntracked(untracked);
+    const containersOnly = server.instanceTypes.includes("virtual-machine") ? "" : " · Containers only, as it has no /dev/kvm";
+    return row(`LXD on ${server.name}`, `<div class="managed-list__description">${escapeHtml(`${where} · LXD ${server.version}${containersOnly}`)}</div>
+      <div class="managed-list__description">${escapeHtml(limits.length ? `Limited to ${limits.join(", ")}` : "No project limits set")}</div>${upgrade}${sandbox}`, disconnect) + renderUntracked(connection, server.name, index, untracked);
   } catch (error) {
     return row("LXD", `<div class="managed-list__description">${escapeHtml(where)}</div>
-      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can’t reach it right now: ${errorMessage(error)}`)}</div>`, disconnect) + notice;
+      <div class="managed-list__description"><span class="status-dot warning" aria-hidden="true"></span> ${escapeHtml(`Can’t reach it right now: ${errorMessage(error)}`)}</div>`, disconnect);
   }
 }
 
-async function renderMachinesSettings(message = ""): Promise<string> {
-  const connection = await readLxdConnection();
-  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${connection ? await renderConnection(connection, message) : renderConnectForm(message)}</section>`;
+/** `notice` is about the servers, like what's left to clean up after disconnecting one; `connectError` about connecting one. */
+async function renderMachinesSettings({ notice = "", connectError = "" }: { notice?: string; connectError?: string } = {}): Promise<string> {
+  const connections = await readLxdConnections();
+  const noticeHtml = notice ? `<p class="settings-error">${escapeHtml(notice)}</p>` : "";
+  let body: string;
+  if (!connections.length) {
+    body = row("LXD", connectFormHtml("<p>Give Agents their own test machines on a server of yours, for work that needs real disks, a kernel of its own, or several machines.</p>", connectError)) + noticeHtml;
+  } else {
+    const servers = await Promise.all(connections.map((connection, index) => renderConnection(connection, index)));
+    const another = disclosureHtml({
+      summary: { kind: "compact", width: "fit", label: { kind: "text", text: "Connect another server" } },
+      bodyHtml: connectFormHtml("<p>More servers make room for more machines. A workspace’s first machine goes to the server with the fewest, and the rest follow it there, so they can reach each other.</p>", connectError),
+      open: Boolean(connectError),
+    });
+    body = servers.join("") + noticeHtml + another;
+  }
+  return `<section class="settings-sec settings-sec-machines" id="${sectionId}"><h2>Machines</h2>${body}</section>`;
 }
 
 async function connect(request: Request): Promise<string> {
-  // A second submit from a stale page must not trust another certificate.
-  if (await readLxdConnection()) return await renderMachinesSettings();
   const token = String((await request.formData()).get("token") ?? "");
   try {
     const credentials = await createLxdClientCredentials(suggestedProject);
     const { server, project } = await joinLxdServer(token, credentials);
-    await saveLxdConnection({ server, project, credentials });
+    try {
+      await addLxdConnection({ server, project, credentials });
+    } catch (error) {
+      // AITC can't use the certificate it just joined with, as when that project is connected already with another one.
+      await new LxdServerClient({ server, credentials }).removeOwnCertificate();
+      throw error;
+    }
     return await renderMachinesSettings();
   } catch (error) {
-    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(error.message);
+    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings({ connectError: error.message });
     throw error;
   }
 }
 
+async function disconnect(request: Request): Promise<string> {
+  const connection = await namedConnection(await request.formData());
+  return await renderMachinesSettings({ notice: connection && await disconnectLxd(lxdLocation(connection)) });
+}
+
 async function deleteUntracked(request: Request): Promise<string> {
-  const connection = await readLxdConnection();
+  const form = await request.formData();
+  const connection = await namedConnection(form);
   if (!connection) return await renderMachinesSettings();
   try {
-    await deleteUntrackedMachine(new LxdClient(connection), String((await request.formData()).get("name") ?? ""));
+    await deleteUntrackedMachine(new LxdClient(connection), String(form.get("name") ?? ""));
   } catch (error) {
-    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings(error.message);
+    if (error instanceof AgentsInTheCloudCoreError) return await renderMachinesSettings({ notice: error.message });
     throw error;
   }
   return await renderMachinesSettings();
@@ -156,7 +196,7 @@ export const machinesSettingsContribution: SettingsContribution = {
   async handleAction({ request, url }) {
     if (request.method !== "POST") return undefined;
     if (url.pathname === connectPath) return turboStreamResponse(turboStream("replace", sectionId, await connect(request)));
-    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await renderMachinesSettings(await disconnectLxd())));
+    if (url.pathname === disconnectPath) return turboStreamResponse(turboStream("replace", sectionId, await disconnect(request)));
     if (url.pathname === deleteUntrackedPath) return turboStreamResponse(turboStream("replace", sectionId, await deleteUntracked(request)));
     return undefined;
   },

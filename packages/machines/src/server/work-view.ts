@@ -8,7 +8,7 @@ import { jsonResponse, matchRoute, wantsStream } from "@agents-in-the-cloud/shar
 import { createWorkspaceTerminal } from "@agents-in-the-cloud/workspace-terminal/server/workspace-terminals";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { answeredInTime, readLxdConnection } from "./connection.ts";
+import { answeredInTime, readLxdConnections } from "./connection.ts";
 import type { MachineView } from "./leases.ts";
 import { machineLeases, templateMachineSettings } from "./runtime.ts";
 
@@ -45,11 +45,13 @@ function remaining(expiresAt: string): string {
   return minutes < 48 * 60 ? `${Math.round(minutes / 60)} h left` : `${Math.round(minutes / (24 * 60))} days left`;
 }
 
-function machineRow(workspaceId: string, machine: MachineView): string {
+/** `showServer` when there's more than one the machine could be on. */
+function machineRow(workspaceId: string, machine: MachineView, showServer: boolean): string {
   const path = `/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.name)}`;
   const state = states[machine.state];
   const disks = machine.diskSizesGiB.length ? ` · ${machine.diskSizesGiB.length === 1 ? "1 extra disk" : `${machine.diskSizesGiB.length} extra disks`}` : "";
   const kind = machine.type === "virtual-machine" ? "VM" : "Container";
+  const server = showServer ? ` · on ${machine.server}` : "";
   const status = `<span class="status-dot ${state.dot}" aria-hidden="true"></span> ${escapeHtml(machine.error ? `${state.label}: ${machine.error}` : state.label)}`;
   const terminal = machine.state === "ready" || machine.state === "stopped"
     ? `<form method="post" action="${path}/terminal" data-turbo="true">${buttonHtml({ type: "submit", variant: "secondary", content: { kind: "caption", caption: "Open terminal", iconHtml: Icons.Terminal } })}</form>`
@@ -65,7 +67,7 @@ function machineRow(workspaceId: string, machine: MachineView): string {
     <span class="managed-list__visual" aria-hidden="true">${Icons.Server}</span>
     <div class="managed-list__content">
       <div class="managed-list__label"><span class="managed-list__label-text">${escapeHtml(machine.name)}</span></div>
-      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image} · ${machine.cpus} ${machine.cpus === 1 ? "CPU" : "CPUs"}, ${machine.memoryGiB} GiB memory${disks} · ${remaining(machine.expiresAt)}`)}</div>
+      <div class="managed-list__description">${escapeHtml(`${kind} from ${machine.image} · ${machine.cpus} ${machine.cpus === 1 ? "CPU" : "CPUs"}, ${machine.memoryGiB} GiB memory${disks} · ${remaining(machine.expiresAt)}${server}`)}</div>
       <div class="managed-list__description">${status}</div>
     </div>
     <div class="managed-list__actions">${terminal}${release}</div>
@@ -75,13 +77,13 @@ function machineRow(workspaceId: string, machine: MachineView): string {
 async function renderMachinesView(workspaceId: string): Promise<string> {
   let body: string;
   try {
-    const [machines, { profiles }, connection] = await answeredInTime(Promise.all([machineLeases.list(workspaceId), machineLeases.settings(workspaceId), readLxdConnection()]));
+    const [machines, { profiles }, connections] = await answeredInTime(Promise.all([machineLeases.list(workspaceId), machineLeases.settings(workspaceId), readLxdConnections()]));
     const empty = !profiles.length
       ? "This template has no machine profiles yet. Add some in its settings, under Machines."
-      : !connection
+      : !connections.length
         ? "No machines yet. Connect an LXD server in Settings, under Machines, so Agents can create them."
         : `No machines yet. Agents create them from this template’s profiles: ${profiles.map((profile) => profile.name).join(", ")}.`;
-    body = machines.length ? `<div class="managed-list">${machines.map((machine) => machineRow(workspaceId, machine)).join("")}</div>` : `<p>${escapeHtml(empty)}</p>`;
+    body = machines.length ? `<div class="managed-list">${machines.map((machine) => machineRow(workspaceId, machine, connections.length > 1)).join("")}</div>` : `<p>${escapeHtml(empty)}</p>`;
   } catch (error) {
     body = `<p>${escapeHtml(`Can’t reach the LXD server right now: ${errorMessage(error)}`)}</p>`;
   }
@@ -167,10 +169,10 @@ const jsonResult = (description: string) => ({ "200": { description, content: { 
 
 export const machinesOpenApiPaths = {
   "/workspaces/{id}/machines": {
-    get: { summary: "List a workspace's test machines, the profiles it may create them from, and how many it may hold", parameters: [workspaceIdParameter], responses: jsonResult("Machines with name, profile, type, image, state, the DNS name and addresses other machines reach them at, expiry and snapshots") },
+    get: { summary: "List a workspace's test machines, the profiles it may create them from, and how many it may hold", parameters: [workspaceIdParameter], responses: jsonResult("Machines with name, profile, type, image, state, the LXD server they're on, the DNS name and addresses other machines reach them at, expiry and snapshots") },
     post: {
       summary: "Create a test machine for a workspace from one of its template's machine profiles",
-      description: "Waits up to 4 minutes for the machine to boot and returns its state. A machine still booting keeps booting; listing the workspace's machines shows when it's ready. Needs an LXD server connected in Settings.",
+      description: "Waits up to 4 minutes for the machine to boot and returns its state. A machine still booting keeps booting; listing the workspace's machines shows when it's ready. Needs an LXD server connected in Settings. A workspace's machines all go on the same server; its first goes on the connected server with the fewest machines that can take it.",
       parameters: [workspaceIdParameter],
       requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["profile"], properties: { profile: { type: "string" }, name: { type: "string", pattern: "^[a-z][a-z0-9-]{0,39}$" } }, additionalProperties: false } } } },
       responses: jsonResult("The machine"),

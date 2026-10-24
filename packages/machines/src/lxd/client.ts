@@ -70,7 +70,7 @@ interface LxdOperationResult { status_code: number; err: string }
 
 const changeResponse = Type.Union([syncResponse(Type.Unknown()), asyncResponse(Type.Unknown())]);
 const changeFinished = finishedOperation(Type.Unknown());
-const serverResponse = syncResponse(Type.Object({ environment: Type.Object({ server_name: Type.String(), server_version: Type.String() }) }));
+const serverResponse = syncResponse(Type.Object({ environment: Type.Object({ server_name: Type.String(), server_version: Type.String(), instance_types: Type.Optional(Type.Array(Type.String())) }) }));
 const certificateResponse = syncResponse(Type.Object({ restricted: Type.Boolean(), projects: Type.Array(Type.String()) }));
 const projectResponse = syncResponse(Type.Object({ config: Type.Record(Type.String(), Type.String()) }));
 const instanceSchema = Type.Object({
@@ -168,9 +168,11 @@ export class LxdServerClient {
     if (response.type === "async") this.succeeded((await this.waitFor(changeFinished, response.operation, what)).metadata, what);
   }
 
-  async server(): Promise<{ name: string; version: string }> {
+  /** `instanceTypes` are the kinds of instance it can run now: no virtual machines without /dev/kvm. */
+  async server(): Promise<{ name: string; version: string; instanceTypes: string[] }> {
     const { environment } = (await this.get(serverResponse, "/1.0")).metadata;
-    return { name: environment.server_name, version: environment.server_version };
+    // LXD before 4.21 doesn't say, and is too old for machines anyway.
+    return { name: environment.server_name, version: environment.server_version, instanceTypes: environment.instance_types ?? [] };
   }
 
   /** Redeem a trust token for the client certificate this connection presents. */

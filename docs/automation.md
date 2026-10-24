@@ -56,7 +56,7 @@ Workspace template settings has a browser-navigable surface that agents can pass
 
 Supported sections are `index`, `general`, `secrets`, `ssh`, `environment`, `network`, `container`, and `machines`. The index lists the settings sections; each section opens a focused page in the complete AgentsInTheCloud shell. Use `editor=new` or a record ID for Secrets, SSH keys, Environment Variables, or machine profiles, `editor=docker`, `images`, or `dockerfile` for Container, and `editor=limit` for the machines-per-workspace limit. Legacy section links (`repository`, `ssh-keys`, `privileged`, `dockerfile`, `preload-images`, and `danger`) still resolve to their corresponding pages.
 
-**Machines** lists the profiles Agents may create test machines from on the LXD server connected in Settings, and how many machines one Workspace may hold. Create, update and delete profiles with `POST /workspace-templates/:workspaceTemplateId/machine-profiles[/:profileId[/delete]]`, and set the limit with `POST /workspace-templates/:workspaceTemplateId/max-machines`. Changes apply to machines created afterwards.
+**Machines** lists the profiles Agents may create test machines from on the LXD servers connected in Settings, and how many machines one Workspace may hold. Create, update and delete profiles with `POST /workspace-templates/:workspaceTemplateId/machine-profiles[/:profileId[/delete]]`, and set the limit with `POST /workspace-templates/:workspaceTemplateId/max-machines`. Changes apply to machines created afterwards.
 
 **Secrets** manages protected credential entries shared with a template's Workspaces. Agents receive placeholders; real values are substituted into requests to allowed hosts. Secret changes apply to existing Workspaces, while Environment Variables only apply to new containers. Secret summaries never return real values.
 
@@ -170,7 +170,7 @@ curl -sS -X POST "http://localhost:3000/workspaces/$id/commands/agent.create.cla
 
 Navigate an existing Browser view with `POST /workspaces/:id/browser/:browserId/navigate` and `{ "url": "..." }`.
 
-Stage test machines for a Workspace whose template has machine profiles, and an LXD server connected in Settings. Creating one waits up to 4 minutes for it to boot and answers with its `state`. One that's still `creating` or `starting` keeps going; list the machines until it's `ready`. Inside the Workspace, `ssh <name>` reaches it, waiting while it boots. `machines.open` opens the Machines Work view.
+Stage test machines for a Workspace whose template has machine profiles, and an LXD server connected in Settings. A Workspace's machines all go on one server; each machine's `server` says which. Creating one waits up to 4 minutes for it to boot and answers with its `state`. One that's still `creating` or `starting` keeps going; list the machines until it's `ready`. Inside the Workspace, `ssh <name>` reaches it, waiting while it boots. `machines.open` opens the Machines Work view.
 
 ```sh
 curl -sS -X POST "http://localhost:3000/workspaces/$id/machines" \

@@ -1,7 +1,7 @@
 import { getWorkspaceInit } from "@agents-in-the-cloud/workspace";
 import { getWorkspaceTemplateConfiguration, isGitWorkspaceTemplateInit, workspaceSshContainerDirectory, workspaceSshDirectory, workspaceSshReadsConfigDirectory, workspaceTemplateIdFromInit } from "@agents-in-the-cloud/workspace-templates";
 import { LxdClient } from "../lxd/index.ts";
-import { readLxdConnection } from "./connection.ts";
+import { readLxdConnections } from "./connection.ts";
 import { createMachineLeases, type MachineSettings } from "./leases.ts";
 import { workspaceMachinePublicKey, workspaceMachinesDirectory } from "./machine-key.ts";
 import { createMachineTunnels } from "./tunnels.ts";
@@ -20,9 +20,8 @@ async function machineSettings(workspaceId: string): Promise<MachineSettings> {
   return await templateMachineSettings(isGitWorkspaceTemplateInit(init) ? workspaceTemplateIdFromInit(init) : undefined);
 }
 
-async function connectedLxd(): Promise<LxdClient | undefined> {
-  const connection = await readLxdConnection();
-  return connection && new LxdClient(connection);
+async function connectedLxds(): Promise<LxdClient[]> {
+  return (await readLxdConnections()).map((connection) => new LxdClient(connection));
 }
 
 let showChange = (_workspaceId: string) => {};
@@ -40,7 +39,7 @@ export const machineTunnels = createMachineTunnels({
 });
 
 export const machineLeases = createMachineLeases({
-  lxd: connectedLxd,
+  lxds: connectedLxds,
   machineSettings,
   publicKey: workspaceMachinePublicKey,
   // Machines' ssh config is a file in ssh_config.d.

@@ -6,7 +6,7 @@ import { errorMessage, escapeHtml, type WorkspaceDeletionReview, type WorkspaceS
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { lxdLocation, sameLxdLocation, type LxdInstance } from "../lxd/index.ts";
-import { readLxdConnection } from "./connection.ts";
+import { readLxdConnections } from "./connection.ts";
 import { removeInstance, type MachineLxd } from "./leases.ts";
 import { workspaceMachinesDirectory, workspacesWithMachines } from "./machine-key.ts";
 import { machineLeases, machineTunnels } from "./runtime.ts";
@@ -24,9 +24,8 @@ export const machinesDeletionReview: WorkspaceDeletionReview = {
   async inspect(workspaceId) {
     const leases = await machineLeases.stored(workspaceId);
     if (!leases.length) return { status: "clear" };
-    const connection = await readLxdConnection();
-    const here = connection && lxdLocation(connection);
-    const deleted = leases.filter((lease) => here && sameLxdLocation(lease.location, here)).map((lease) => lease.name).sort();
+    const connected = (await readLxdConnections()).map(lxdLocation);
+    const deleted = leases.filter((lease) => connected.some((location) => sameLxdLocation(lease.location, location))).map((lease) => lease.name).sort();
     const kept = leases.map((lease) => lease.name).filter((name) => !deleted.includes(name)).sort();
     return { status: "blocked", fingerprint: createHash("sha256").update(JSON.stringify({ deleted, kept })).digest("hex"), details: { deleted, kept } };
   },
@@ -34,7 +33,7 @@ export const machinesDeletionReview: WorkspaceDeletionReview = {
     if (!Value.Check(evidenceSchema, details)) throw new Error("Machine deletion evidence is invalid");
     const sections = [];
     if (details.deleted.length) sections.push(`<p>Deleting this workspace also deletes its machines, with their disks and snapshots:</p>${machineList(details.deleted)}`);
-    if (details.kept.length) sections.push(`<p>${details.deleted.length ? "These machines" : "Its machines"} stay on their LXD server, which isn’t connected right now. Connect it again in Settings to delete them there:</p>${machineList(details.kept)}`);
+    if (details.kept.length) sections.push(`<p>${details.deleted.length ? "These machines" : "Its machines"} stay on an LXD server that isn’t connected right now. Connect it again in Settings to delete them there:</p>${machineList(details.kept)}`);
     return `<section class="workspace-deletion-machines">${sections.join("")}</section>`;
   },
 };
@@ -71,7 +70,7 @@ export async function deleteUntrackedMachine(lxd: MachineLxd, name: string): Pro
 
 async function sweepExpired(): Promise<void> {
   // Machines can't be released without their server; they're swept once it's connected again.
-  if (!await readLxdConnection()) return;
+  if (!(await readLxdConnections()).length) return;
   for (const workspaceId of await workspacesWithMachines()) {
     try {
       const expired = await machineLeases.expire(workspaceId, Date.now());
@@ -86,7 +85,7 @@ export function registerMachineLifecycle(context: WorkspaceServerModuleContext):
   // A failure here stops the deletion, so machines are never silently left behind.
   context.events.on("workspace_deleting", async ({ workspaceId }) => {
     const kept = await machineLeases.releaseAll(workspaceId);
-    if (kept.length) console.warn(`[machines] Workspace ${workspaceId}'s machines ${kept.join(", ")} stay on an LXD server that isn't connected, untracked`);
+    if (kept.length) console.warn(`[machines] Workspace ${workspaceId}'s machines ${kept.join(", ")} stay on LXD servers that aren't connected, untracked`);
   });
   // A deletion that stops leaves the workspace as it was; trying again releases whatever it gets meanwhile.
   context.events.on("workspace_delete_failed", ({ workspaceId }) => machineLeases.reopen(workspaceId));

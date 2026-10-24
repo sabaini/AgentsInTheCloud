@@ -24,6 +24,8 @@ let serverCertificate: string;
 let credentials: LxdClientCredentials;
 let fake: Server<Upgrade>;
 let trusted = false;
+/** Whether the server trusts another certificate under the name the token gives. */
+let nameTaken = false;
 const operations = new Map<string, Promise<OperationResult | { error: string }>>();
 const execSessions = new Map<string, { session: ExecSession; fd: Fd }>();
 let halfSession: ExecSession | undefined;
@@ -64,6 +66,7 @@ beforeAll(async () => {
       if (path === "/1.0/certificates" && request.method === "POST") {
         const body = await request.json();
         if (body.type !== "client" || body.trust_token !== issuedToken) return failure(403, "Forbidden");
+        if (nameTaken) return failure(409, "Certificate already exists");
         trusted = true;
         return sync(null);
       }
@@ -182,6 +185,11 @@ test("joining refuses tokens that aren't restricted to one project and untrusts 
 test("joining explains rejected tokens", async () => {
   issuedToken = "";
   await expect(joinLxdServer(token(certificateFingerprint(serverCertificate), [fakeAddress()]), credentials)).rejects.toThrow("Each token works only once");
+  // As when the setup script makes a token for a server that's connected already.
+  issuedToken = token(certificateFingerprint(serverCertificate), [fakeAddress()]);
+  nameTaken = true;
+  await expect(joinLxdServer(issuedToken, credentials)).rejects.toThrow("This LXD server already trusts a certificate called aitc, probably because it's connected here already.");
+  nameTaken = false;
 });
 
 test("joining refuses a server whose certificate the token doesn't name", async () => {

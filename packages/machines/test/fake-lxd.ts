@@ -33,7 +33,8 @@ export class FakeLxd implements MachineLxd {
   }
 
   version = "6.9";
-  async server() { return { name: "lxd-test", version: this.version }; }
+  instanceTypes = ["container", "virtual-machine"];
+  async server() { return { name: "lxd-test", version: this.version, instanceTypes: this.instanceTypes }; }
   async projectConfig(project: string) {
     if (project !== this.location.project) throw new LxdRequestError(403, "Forbidden");
     return this.projectSettings;

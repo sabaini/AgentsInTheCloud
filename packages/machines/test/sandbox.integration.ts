@@ -66,7 +66,7 @@ try {
   const keyPath = join(directory, "id_ed25519");
   await command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "aitc sandbox", "-f", keyPath);
   const leases = createMachineLeases({
-    lxd: async () => lxd,
+    lxds: async () => [lxd],
     machineSettings: async () => ({ profiles: [profile, bridged], maxMachines: 3 }),
     publicKey: async () => (await readFile(`${keyPath}.pub`, "utf8")).trim(),
     reachesMachines: async () => true,
